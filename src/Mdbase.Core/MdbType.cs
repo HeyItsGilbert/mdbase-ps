@@ -40,5 +40,8 @@ public sealed record MdbType
     /// </summary>
     public OrderedDictionary? CollectionSection { get; init; }
 
+    /// <summary>Resolved data-contract claims compiled during type loading.</summary>
+    public IReadOnlyList<MdbTypeImplementation> Implements { get; init; } = Array.Empty<MdbTypeImplementation>();
+
     public string CanonicalName => Name.ToLowerInvariant();
 }

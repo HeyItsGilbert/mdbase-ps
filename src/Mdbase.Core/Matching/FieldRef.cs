@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using System.Text.Json.Nodes;
 
 namespace Mdbase.Core.Matching;
 
@@ -18,6 +19,8 @@ internal sealed class FieldRef
         _segments = segments;
     }
 
+    internal IReadOnlyList<string> Segments => _segments;
+
     public static FieldRef Parse(string reference)
     {
         if (reference.Length == 0)
@@ -35,6 +38,34 @@ internal sealed class FieldRef
         }
 
         return new FieldRef(reference.Split('.'));
+    }
+
+    /// <summary>Checks whether this reference addresses a declared schema property path.</summary>
+    internal static bool DeclaresSchemaProperty(JsonNode schema, string reference)
+    {
+        JsonNode? current = schema;
+        foreach (var segment in Parse(reference)._segments)
+        {
+            if (current is not JsonObject currentObject)
+            {
+                return false;
+            }
+
+            if (int.TryParse(segment, out var arrayIndex) && arrayIndex >= 0 && currentObject["items"] is JsonNode itemSchema)
+            {
+                current = itemSchema;
+                continue;
+            }
+
+            if (currentObject["properties"] is not JsonObject properties || properties[segment] is not JsonNode next)
+            {
+                return false;
+            }
+
+            current = next;
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Specialized;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Json.Schema;
 using Mdbase.Core.Json;
@@ -10,8 +11,8 @@ using Mdbase.Core.Yaml;
 namespace Mdbase.Core.Loading;
 
 /// <summary>
-/// Loads one candidate type file (spec Ch.05 "Type Evaluation Model" steps 1-5; step 6,
-/// `implements` resolution against the data-contract registry, is out of scope for this spec).
+/// Loads one candidate type file (spec Ch.05 "Type Evaluation Model" steps 1-6, including
+/// eager <c>implements</c> resolution against the collection's data-contract registry).
 /// The candidate's frontmatter is parsed exactly once by the caller and reused for both
 /// `kind: mdbase.type` detection and this full compile (spec Ch.02 "Type Discovery"; #8
 /// resolution point 3) — a malformed type file gets a real diagnostic here, never a silent skip.
@@ -29,7 +30,11 @@ internal static class TypeFileLoader
     /// any spec violation — the caller catches it, reports one diagnostic naming this file, and
     /// excludes the type from the registry without aborting the whole collection load.
     /// </summary>
-    public static MdbType Load(OrderedDictionary frontmatter, string relativeFilePath, string collectionRoot)
+    public static MdbType Load(
+        OrderedDictionary frontmatter,
+        string relativeFilePath,
+        string collectionRoot,
+        IReadOnlyDictionary<(string Id, string Version), MdbContract> contracts)
     {
         if (frontmatter["name"] is not string name || name.Length == 0)
         {
@@ -51,11 +56,9 @@ internal static class TypeFileLoader
             throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' is missing a 'schema' section.");
         }
 
-        var schema = CompileSchema(schemaSection, relativeFilePath, collectionRoot);
-
+        var (schema, schemaNode) = CompileSchema(schemaSection, relativeFilePath, collectionRoot);
         var matchSection = frontmatter["match"] as OrderedDictionary;
         var match = matchSection is null ? CompiledMatch.None : CompiledMatch.Compile(matchSection);
-
         var collectionSection = frontmatter["collection"] as OrderedDictionary;
         var readDefaults = collectionSection?["read_defaults"] switch
         {
@@ -63,20 +66,71 @@ internal static class TypeFileLoader
             null => new Dictionary<string, object?>(),
             _ => throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-mapping 'collection.read_defaults'."),
         };
-
         var linkRules = ParseLinkRules(collectionSection, relativeFilePath);
+        var implementations = ParseImplements(frontmatter, relativeFilePath, contracts, schemaNode);
 
         return new MdbType
         {
-            Name = name,
-            FilePath = relativeFilePath,
-            Version = version,
-            Schema = schema,
-            Match = match,
-            ReadDefaults = readDefaults,
-            LinkRules = linkRules,
-            CollectionSection = collectionSection,
+            Name = name, FilePath = relativeFilePath, Version = version, Schema = schema, Match = match,
+            ReadDefaults = readDefaults, LinkRules = linkRules, CollectionSection = collectionSection,
+            Implements = implementations,
         };
+    }
+
+    private static IReadOnlyList<MdbTypeImplementation> ParseImplements(
+        OrderedDictionary frontmatter, string path, IReadOnlyDictionary<(string Id, string Version), MdbContract> contracts, JsonNode schemaNode)
+    {
+        if (!frontmatter.Contains("implements") || frontmatter["implements"] is null) return Array.Empty<MdbTypeImplementation>();
+        if (frontmatter["implements"] is not object?[] entries) throw new TypeFileException("invalid_data_contract", $"Type file '{path}' has a non-list 'implements'.");
+        var results = new List<MdbTypeImplementation>();
+        var seen = new HashSet<(string, string)>();
+        foreach (var entry in entries)
+        {
+            if (entry is not OrderedDictionary map || map["contract"] is not string id || map["version"] is not string version || map["fields"] is not OrderedDictionary fields)
+                throw new TypeFileException("invalid_data_contract", $"Type file '{path}' has an implements entry missing contract, version, or fields.");
+            if (!seen.Add((id, version))) throw new TypeFileException("invalid_data_contract", $"Type file '{path}' implements contract '{id}' version '{version}' more than once.");
+            if (!contracts.TryGetValue((id, version), out var contract)) throw new TypeFileException("data_contract_not_found", $"Type file '{path}' references missing contract '{id}' version '{version}'.");
+            if (contract.ContractType != ContractType.Record) throw new TypeFileException("invalid_data_contract", $"Type file '{path}' may only implement record contracts.");
+            var fieldMap = fields.Cast<DictionaryEntry>().ToDictionary(e => (string)e.Key, e => e.Value as string ?? throw new TypeFileException("invalid_data_contract", $"Type file '{path}' has a non-string implements field mapping."));
+            foreach (var required in RequiredProperties(contract.ResolvedSchemas["record_schema"]))
+                if (!MapsRequiredProperty(fieldMap, required)) throw new TypeFileException("data_contract_field_invalid", $"Type file '{path}' does not map required contract field '{required}'.");
+            foreach (var (contractField, recordField) in fieldMap)
+                if (!FieldRef.DeclaresSchemaProperty(contract.ResolvedSchemas["record_schema"], contractField) || !FieldRef.DeclaresSchemaProperty(schemaNode, recordField))
+                    throw new TypeFileException("data_contract_field_invalid", $"Type file '{path}' maps undeclared field '{contractField}' or '{recordField}'.");
+            var binding = map["binding"] as OrderedDictionary;
+            if (map.Contains("binding") && map["binding"] is not null && binding is null) throw new TypeFileException("data_contract_binding_invalid", $"Type file '{path}' has a non-mapping implements binding.");
+            if (contract.BindingSchema is null && binding is not null && binding.Count > 0) throw new TypeFileException("data_contract_binding_invalid", $"Type file '{path}' supplies binding for a contract without binding_schema.");
+            var bindingToValidate = binding ?? new OrderedDictionary();
+            if (contract.BindingSchema is not null && !contract.BindingSchema.Evaluate(JsonModel.ToJsonNode(bindingToValidate)!.Deserialize<System.Text.Json.JsonElement>()).IsValid)
+                throw new TypeFileException("data_contract_binding_invalid", $"Type file '{path}' has binding invalid for contract '{id}' version '{version}'.");
+            var implementationNode = new JsonObject { ["contract"] = id, ["version"] = version, ["fields"] = JsonModel.ToJsonNode(fields) };
+            if (binding is not null) implementationNode["binding"] = JsonModel.ToJsonNode(binding);
+            var typeDigest = new JsonObject { ["name"] = frontmatter["name"] as string, ["schema"] = schemaNode.DeepClone() };
+            AddDigestMember(typeDigest, "version", frontmatter, "version");
+            AddDigestMember(typeDigest, "match", frontmatter, "match");
+            AddDigestMember(typeDigest, "collection", frontmatter, "collection");
+            AddDigestMember(typeDigest, "lifecycle", frontmatter, "lifecycle");
+            var digestInput = new JsonObject { ["contract_digest"] = contract.Digest, ["type"] = typeDigest, ["implementation"] = implementationNode };
+            results.Add(new MdbTypeImplementation { ContractId = id, ContractVersion = version, ContractDigest = contract.Digest, Fields = fieldMap, Binding = binding, ImplementationDigest = ContractFileLoader.Digest(digestInput) });
+        }
+
+        return results;
+    }
+    private static IEnumerable<string> RequiredProperties(JsonNode schema) =>
+        schema is JsonObject obj && obj["required"] is JsonArray array
+            ? array.Select(node => node?.GetValue<string>()).OfType<string>()
+            : Array.Empty<string>();
+
+    private static bool MapsRequiredProperty(IReadOnlyDictionary<string, string> fieldMap, string required) =>
+        fieldMap.ContainsKey(required) || fieldMap.ContainsKey("/" + required.Replace("~", "~0").Replace("/", "~1"));
+
+
+    private static void AddDigestMember(JsonObject target, string targetKey, OrderedDictionary source, string sourceKey)
+    {
+        if (source.Contains(sourceKey) && source[sourceKey] is not null)
+        {
+            target[targetKey] = JsonModel.ToJsonNode(source[sourceKey]);
+        }
     }
 
     private static IReadOnlyDictionary<string, LinkFieldRule> ParseLinkRules(OrderedDictionary? collectionSection, string relativeFilePath)
@@ -114,7 +168,7 @@ internal static class TypeFileLoader
         return rules;
     }
 
-    private static JsonSchema CompileSchema(OrderedDictionary schemaSection, string relativeFilePath, string collectionRoot)
+    internal static (JsonSchema Schema, JsonNode Node) CompileSchema(OrderedDictionary schemaSection, string relativeFilePath, string collectionRoot)
     {
         var dialect = schemaSection["dialect"] as string ?? "json-schema-2020-12";
         if (dialect != "json-schema-2020-12")
@@ -157,7 +211,7 @@ internal static class TypeFileLoader
 
         try
         {
-            return JsonSchema.FromText(schemaNode!.ToJsonString());
+            return (JsonSchema.FromText(schemaNode!.ToJsonString()), schemaNode);
         }
         catch (Exception ex)
         {

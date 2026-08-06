@@ -6,6 +6,9 @@ using Mdbase.Core.Discovery;
 using Mdbase.Core.Links;
 using Mdbase.Core.Loading;
 using Mdbase.Core.Matching;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Mdbase.Core.Json;
 using Mdbase.Core.Yaml;
 
 namespace Mdbase.Core;
@@ -22,6 +25,7 @@ public sealed class MdbCollection
     private const string DefaultRuntimeExcludedName2 = "node_modules";
 
     private readonly Dictionary<string, MdbType> _typesByCanonicalName;
+    private readonly Dictionary<(string Id, string Version), MdbContract> _contractsByIdentity;
     private readonly Dictionary<string, MdbRecord> _recordsByPath;
     private readonly List<MdbDiagnostic> _diagnostics;
     private readonly ResolutionIndexes _linkIndexes;
@@ -31,12 +35,14 @@ public sealed class MdbCollection
     private MdbCollection(
         string rootPath,
         MdbCollectionConfig config,
+        Dictionary<(string Id, string Version), MdbContract> contracts,
         Dictionary<string, MdbType> types,
         Dictionary<string, MdbRecord> records,
         List<MdbDiagnostic> diagnostics)
     {
         RootPath = rootPath;
         Config = config;
+        _contractsByIdentity = contracts;
         _typesByCanonicalName = types;
         _recordsByPath = records;
         _diagnostics = diagnostics;
@@ -51,11 +57,56 @@ public sealed class MdbCollection
     /// <summary>The loaded type registry, keyed by canonical (lower-case) type name.</summary>
     public IReadOnlyDictionary<string, MdbType> Types => _typesByCanonicalName;
 
+    /// <summary>The collection-local contract registry, keyed by the exact id/version pair.</summary>
+    public IReadOnlyDictionary<(string Id, string Version), MdbContract> Contracts => _contractsByIdentity;
+
     /// <summary>Every indexed record, keyed by collection-relative forward-slash path.</summary>
     public IReadOnlyDictionary<string, MdbRecord> Records => _recordsByPath;
 
     /// <summary>Registry-level diagnostics: invalid/rejected type files and duplicate type-name conflicts.</summary>
     public IReadOnlyList<MdbDiagnostic> Diagnostics => _diagnostics;
+
+    /// <summary>Returns all types with a validated claim to the exact contract version.</summary>
+    public IReadOnlyList<MdbType> GetImplementations(string contractId, string version) =>
+        _typesByCanonicalName.Values.Where(type => type.Implements.Any(implementation =>
+            implementation.ContractId == contractId && implementation.ContractVersion == version)).ToArray();
+
+    /// <summary>Builds and validates a record's normalized view through one matching record-contract implementation.</summary>
+    public MdbContractView GetContractView(MdbRecord record, MdbType type, string contractId, string version)
+    {
+        if (!record.MatchedTypes.Contains(type))
+        {
+            throw new ArgumentException("The supplied type does not match the record.", nameof(type));
+        }
+
+        var implementation = type.Implements.SingleOrDefault(candidate => candidate.ContractId == contractId && candidate.ContractVersion == version)
+            ?? throw new ArgumentException("The supplied type does not implement the requested contract version.", nameof(contractId));
+        var contract = _contractsByIdentity[(contractId, version)];
+        if (contract.ContractType != ContractType.Record || contract.RecordSchema is null)
+        {
+            throw new ArgumentException("Contract views require a record contract.", nameof(contractId));
+        }
+
+        var view = new JsonObject();
+        foreach (var (contractField, recordField) in implementation.Fields)
+        {
+            if (TryResolve(record.EffectiveFrontmatter, recordField, out var value))
+            {
+                Assign(view, contractField, JsonModel.ToJsonNode(value));
+            }
+        }
+
+        var results = contract.RecordSchema.Evaluate(view.Deserialize<JsonElement>());
+        var diagnostic = results.IsValid ? null : new MdbDiagnostic
+        {
+            Severity = MdbSeverity.Error,
+            Code = "data_contract_record_invalid",
+            Message = $"Record '{record.FileInfo.Path}' does not satisfy contract '{contractId}' version '{version}'.",
+            Path = record.FileInfo.Path,
+            Type = type.Name,
+        };
+        return new MdbContractView(view, diagnostic);
+    }
 
     /// <summary>
     /// Every resolved, non-ambiguous <see cref="MdbBacklinkEntry"/> whose link targets
@@ -92,9 +143,10 @@ public sealed class MdbCollection
         }
 
         var diagnostics = new List<MdbDiagnostic>();
-        var types = BuildTypeRegistry(root, config, diagnostics);
+        var contracts = BuildContractRegistry(root, config, diagnostics);
+        var types = BuildTypeRegistry(root, config, contracts, diagnostics);
 
-        var collection = new MdbCollection(root, config, types, new Dictionary<string, MdbRecord>(StringComparer.Ordinal), diagnostics);
+        var collection = new MdbCollection(root, config, contracts, types, new Dictionary<string, MdbRecord>(StringComparer.Ordinal), diagnostics);
         foreach (var relativePath in collection.DiscoverRecordPaths())
         {
             collection._recordsByPath[relativePath] = collection.LoadSingleRecord(relativePath);
@@ -106,13 +158,18 @@ public sealed class MdbCollection
     }
 
     /// <summary>
-    /// Re-derives the affected part of the in-memory index for one changed path (#8 resolution
-    /// point 7): a record-path change patches just that record; a type-path change rebuilds the
-    /// whole type registry and re-runs matching for every already-indexed record.
+    /// point 7): a record-path change patches just that record; a type- or contract-path change
+    /// rebuilds the applicable registry and re-runs matching for every already-indexed record.
     /// </summary>
     public void Refresh(string relativePath)
     {
         relativePath = relativePath.Replace('\\', '/').TrimStart('/');
+
+        if (IsUnderFolder(relativePath, Config.ContractsFolder))
+        {
+            RefreshContractRegistry();
+            return;
+        }
 
         if (IsUnderFolder(relativePath, Config.TypesFolder))
         {
@@ -127,7 +184,7 @@ public sealed class MdbCollection
     {
         _typesByCanonicalName.Clear();
         var diagnostics = new List<MdbDiagnostic>();
-        foreach (var (name, type) in BuildTypeRegistry(RootPath, Config, diagnostics))
+        foreach (var (name, type) in BuildTypeRegistry(RootPath, Config, _contractsByIdentity, diagnostics))
         {
             _typesByCanonicalName[name] = type;
         }
@@ -143,6 +200,27 @@ public sealed class MdbCollection
         // A `collection.links` rule change is exactly as blast-radius-everything as a
         // `read_defaults` change already is — rebuild both resolution dictionaries and the
         // backward index from scratch (#9's Refresh(typePath) resolution).
+        RunFullLinkPhase();
+    }
+
+    private void RefreshContractRegistry()
+    {
+        _contractsByIdentity.Clear();
+        var diagnostics = new List<MdbDiagnostic>();
+        foreach (var (identity, contract) in BuildContractRegistry(RootPath, Config, diagnostics))
+        {
+            _contractsByIdentity[identity] = contract;
+        }
+
+        _typesByCanonicalName.Clear();
+        foreach (var (name, type) in BuildTypeRegistry(RootPath, Config, _contractsByIdentity, diagnostics))
+        {
+            _typesByCanonicalName[name] = type;
+        }
+
+        _diagnostics.Clear();
+        _diagnostics.AddRange(diagnostics);
+        foreach (var relativePath in _recordsByPath.Keys.ToArray()) _recordsByPath[relativePath] = LoadSingleRecord(relativePath);
         RunFullLinkPhase();
     }
 
@@ -252,10 +330,61 @@ public sealed class MdbCollection
         }
     }
 
-    private static Dictionary<string, MdbType> BuildTypeRegistry(string root, MdbCollectionConfig config, List<MdbDiagnostic> diagnostics)
+    private static Dictionary<(string Id, string Version), MdbContract> BuildContractRegistry(string root, MdbCollectionConfig config, List<MdbDiagnostic> diagnostics)
+    {
+        var contractsRoot = Path.Combine(root, config.ContractsFolder);
+        var loaded = new List<MdbContract>();
+        foreach (var absolutePath in PruningWalker.WalkFiles(root, contractsRoot, relativeDir => IsPrunedDirectory(relativeDir, root, config, isDefinitionWalk: true)))
+        {
+            if (!string.Equals(Path.GetExtension(absolutePath), ".md", StringComparison.OrdinalIgnoreCase)) continue;
+            var relativePath = PathUtil.ToRelative(root, absolutePath);
+            try
+            {
+                var frontmatter = FrontmatterParser.Parse(File.ReadAllText(absolutePath)).Frontmatter;
+                if (!ContractFileLoader.IsContractCandidate(frontmatter))
+                {
+                    if (frontmatter["kind"] is string kind && kind.StartsWith("mdbase.", StringComparison.Ordinal))
+                    {
+                        diagnostics.Add(new MdbDiagnostic { Severity = MdbSeverity.Error, Code = "invalid_data_contract", Message = $"Contract file '{relativePath}' has invalid kind '{kind}'.", Path = relativePath });
+                    }
+
+                    continue;
+                }
+
+                loaded.Add(ContractFileLoader.Load(frontmatter, relativePath, root));
+            }
+            catch (Exception ex) when (ex is FrontmatterParseException or ContractFileException)
+            {
+                diagnostics.Add(new MdbDiagnostic { Severity = MdbSeverity.Error, Code = "invalid_data_contract", Message = ex.Message, Path = relativePath });
+            }
+        }
+
+        var registry = new Dictionary<(string Id, string Version), MdbContract>();
+        foreach (var group in loaded.GroupBy(contract => (contract.Id, contract.Version)))
+        {
+            var definitions = group.ToArray();
+            if (definitions.Select(contract => contract.Digest).Distinct(StringComparer.Ordinal).Count() == 1)
+            {
+                registry[group.Key] = definitions[0];
+                continue;
+            }
+
+            diagnostics.Add(new MdbDiagnostic
+            {
+                Severity = MdbSeverity.Error,
+                Code = "data_contract_conflict",
+                Message = $"Contract '{group.Key.Id}' version '{group.Key.Version}' has conflicting definitions.",
+                Details = new Dictionary<string, object?> { ["files"] = definitions.Select(contract => contract.FilePath).ToArray() },
+            });
+        }
+
+        return registry;
+    }
+
+    private static Dictionary<string, MdbType> BuildTypeRegistry(string root, MdbCollectionConfig config, IReadOnlyDictionary<(string Id, string Version), MdbContract> contracts, List<MdbDiagnostic> diagnostics)
     {
         var typesRoot = Path.Combine(root, config.TypesFolder);
-        var candidates = PruningWalker.WalkFiles(root, typesRoot, relativeDir => IsPrunedDirectory(relativeDir, root, config, isTypeWalk: true));
+        var candidates = PruningWalker.WalkFiles(root, typesRoot, relativeDir => IsPrunedDirectory(relativeDir, root, config, isDefinitionWalk: true));
 
         var loaded = new List<MdbType>();
         foreach (var absolutePath in candidates)
@@ -290,7 +419,7 @@ public sealed class MdbCollection
 
             try
             {
-                loaded.Add(TypeFileLoader.Load(frontmatter, relativePath, root));
+                loaded.Add(TypeFileLoader.Load(frontmatter, relativePath, root, contracts));
             }
             catch (TypeFileException ex)
             {
@@ -326,9 +455,61 @@ public sealed class MdbCollection
         return registry;
     }
 
+    private static bool TryResolve(OrderedDictionary source, string reference, out object? value)
+    {
+        var resolved = FieldRef.Parse(reference).Resolve(source);
+        value = resolved.Value;
+        return resolved.Exists;
+    }
+
+    private static void Assign(JsonObject target, string reference, JsonNode? value)
+    {
+        var segments = FieldRef.Parse(reference).Segments.ToArray();
+        JsonNode current = target;
+        for (var index = 0; index < segments.Length - 1; index++)
+        {
+            current = GetOrCreateChild(current, segments[index], CreateContainer(segments[index + 1]));
+        }
+
+        SetChild(current, segments[^1], value);
+    }
+
+    private static JsonNode CreateContainer(string nextSegment) => int.TryParse(nextSegment, out _) ? new JsonArray() : new JsonObject();
+
+    private static JsonNode GetOrCreateChild(JsonNode parent, string segment, JsonNode value)
+    {
+        if (parent is JsonObject objectParent)
+        {
+            if (objectParent[segment] is JsonNode existing) return existing;
+            objectParent[segment] = value;
+            return value;
+        }
+
+        var arrayParent = (JsonArray)parent;
+        if (!int.TryParse(segment, out var index) || index < 0) throw new ArgumentException("Array field references must use non-negative indexes.", nameof(segment));
+        while (arrayParent.Count <= index) arrayParent.Add(null);
+        if (arrayParent[index] is JsonNode existingArrayValue) return existingArrayValue;
+        arrayParent[index] = value;
+        return value;
+    }
+
+    private static void SetChild(JsonNode parent, string segment, JsonNode? value)
+    {
+        if (parent is JsonObject objectParent)
+        {
+            objectParent[segment] = value;
+            return;
+        }
+
+        var arrayParent = (JsonArray)parent;
+        if (!int.TryParse(segment, out var index) || index < 0) throw new ArgumentException("Array field references must use non-negative indexes.", nameof(segment));
+        while (arrayParent.Count <= index) arrayParent.Add(null);
+        arrayParent[index] = value;
+    }
+
     private IEnumerable<string> DiscoverRecordPaths()
     {
-        var candidates = PruningWalker.WalkFiles(RootPath, RootPath, relativeDir => IsPrunedDirectory(relativeDir, RootPath, Config, isTypeWalk: false));
+        var candidates = PruningWalker.WalkFiles(RootPath, RootPath, relativeDir => IsPrunedDirectory(relativeDir, RootPath, Config, isDefinitionWalk: false));
         foreach (var absolutePath in candidates)
         {
             var relativePath = PathUtil.ToRelative(RootPath, absolutePath);
@@ -352,7 +533,7 @@ public sealed class MdbCollection
         || string.Equals(relativePath, "mdbase.yaml", StringComparison.Ordinal)
         || Config.Exclude.Any(glob => GlobPattern.Compile(glob).IsMatch(relativePath));
 
-    private static bool IsPrunedDirectory(string relativeDir, string root, MdbCollectionConfig config, bool isTypeWalk)
+    private static bool IsPrunedDirectory(string relativeDir, string root, MdbCollectionConfig config, bool isDefinitionWalk)
     {
         if (relativeDir.Length == 0)
         {
@@ -360,7 +541,7 @@ public sealed class MdbCollection
         }
 
 
-        if (!config.IncludeSubfolders && !isTypeWalk)
+        if (!config.IncludeSubfolders && !isDefinitionWalk)
         {
             return true;
         }
@@ -376,7 +557,7 @@ public sealed class MdbCollection
             return true;
         }
 
-        if (!isTypeWalk)
+        if (!isDefinitionWalk)
         {
             if (IsUnderFolder(relativeDir, config.TypesFolder) || relativeDir == config.TypesFolder)
             {
