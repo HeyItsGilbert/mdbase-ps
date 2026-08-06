@@ -37,3 +37,11 @@ skips exactly these cases, each for a named reason:
   (Links, #9)
 
 Every other case in the file runs for real against `Mdbase.Core`.
+
+## Data contracts
+
+Source: `tests/v0.3/data-contracts/data-contracts.yaml` at commit
+`02388190b9287954139d7feac49d0e3e10c44cfe` (2026-08-03). The referenced
+TaskNotes and data-contract fixture inputs are copied under `data-contracts/sources/`
+so the suite remains an offline, dated snapshot. `DataContractsConformanceTests`
+drives each case through `MdbCollection`'s public contract seams.

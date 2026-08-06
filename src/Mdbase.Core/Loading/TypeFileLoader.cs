@@ -88,24 +88,48 @@ internal static class TypeFileLoader
         {
             if (entry is not OrderedDictionary map || map["contract"] is not string id || map["version"] is not string version || map["fields"] is not OrderedDictionary fields)
                 throw new TypeFileException("invalid_data_contract", $"Type file '{path}' has an implements entry missing contract, version, or fields.");
+            if (!ContractFileLoader.IsValidContractId(id) || !ContractFileLoader.IsValidSemanticVersion(version))
+                throw new TypeFileException("invalid_data_contract", $"Type file '{path}' has an implements entry with an invalid contract identity.");
             if (!seen.Add((id, version))) throw new TypeFileException("invalid_data_contract", $"Type file '{path}' implements contract '{id}' version '{version}' more than once.");
             if (!contracts.TryGetValue((id, version), out var contract)) throw new TypeFileException("data_contract_not_found", $"Type file '{path}' references missing contract '{id}' version '{version}'.");
             if (contract.ContractType != ContractType.Record) throw new TypeFileException("invalid_data_contract", $"Type file '{path}' may only implement record contracts.");
             var fieldMap = fields.Cast<DictionaryEntry>().ToDictionary(e => (string)e.Key, e => e.Value as string ?? throw new TypeFileException("invalid_data_contract", $"Type file '{path}' has a non-string implements field mapping."));
+            try
+            {
+                foreach (var (contractField, recordField) in fieldMap)
+                {
+                    var contractFieldRef = FieldRef.Parse(contractField);
+                    var recordFieldRef = FieldRef.Parse(recordField);
+                    if (!FieldRef.DeclaresSchemaProperty(contract.ResolvedSchemas["record_schema"], contractFieldRef))
+                        throw new TypeFileException("data_contract_field_invalid", $"Type file '{path}' maps a contract field that is not declared: '{contractField}'.");
+                    if (!FieldRef.DeclaresSchemaProperty(schemaNode, recordFieldRef))
+                        throw new TypeFileException("data_contract_field_invalid", $"Record field is not declared: '{recordField}' in type file '{path}'.");
+                }
+            }
+            catch (ArgumentException ex)
+            {
+                throw new TypeFileException("invalid_data_contract", $"Type file '{path}' has an invalid implements field reference: {ex.Message}");
+            }
             foreach (var required in RequiredProperties(contract.ResolvedSchemas["record_schema"]))
                 if (!MapsRequiredProperty(fieldMap, required)) throw new TypeFileException("data_contract_field_invalid", $"Type file '{path}' does not map required contract field '{required}'.");
-            foreach (var (contractField, recordField) in fieldMap)
-                if (!FieldRef.DeclaresSchemaProperty(contract.ResolvedSchemas["record_schema"], contractField) || !FieldRef.DeclaresSchemaProperty(schemaNode, recordField))
-                    throw new TypeFileException("data_contract_field_invalid", $"Type file '{path}' maps undeclared field '{contractField}' or '{recordField}'.");
             var binding = map["binding"] as OrderedDictionary;
-            if (map.Contains("binding") && map["binding"] is not null && binding is null) throw new TypeFileException("data_contract_binding_invalid", $"Type file '{path}' has a non-mapping implements binding.");
+            if (map.Contains("binding") && map["binding"] is not null && binding is null)
+                throw new TypeFileException("data_contract_binding_invalid", $"Type file '{path}' has a non-mapping implements binding.");
             if (contract.BindingSchema is null && binding is not null && binding.Count > 0) throw new TypeFileException("data_contract_binding_invalid", $"Type file '{path}' supplies binding for a contract without binding_schema.");
             var bindingToValidate = binding ?? new OrderedDictionary();
             if (contract.BindingSchema is not null && !contract.BindingSchema.Evaluate(JsonModel.ToJsonNode(bindingToValidate)!.Deserialize<System.Text.Json.JsonElement>()).IsValid)
                 throw new TypeFileException("data_contract_binding_invalid", $"Type file '{path}' has binding invalid for contract '{id}' version '{version}'.");
             var implementationNode = new JsonObject { ["contract"] = id, ["version"] = version, ["fields"] = JsonModel.ToJsonNode(fields) };
             if (binding is not null) implementationNode["binding"] = JsonModel.ToJsonNode(binding);
-            var typeDigest = new JsonObject { ["name"] = frontmatter["name"] as string, ["schema"] = schemaNode.DeepClone() };
+            var typeDigest = new JsonObject
+            {
+                ["name"] = frontmatter["name"] as string,
+                ["schema"] = new JsonObject
+                {
+                    ["dialect"] = (frontmatter["schema"] as OrderedDictionary)?["dialect"] as string ?? "json-schema-2020-12",
+                    ["value"] = schemaNode.DeepClone(),
+                },
+            };
             AddDigestMember(typeDigest, "version", frontmatter, "version");
             AddDigestMember(typeDigest, "match", frontmatter, "match");
             AddDigestMember(typeDigest, "collection", frontmatter, "collection");

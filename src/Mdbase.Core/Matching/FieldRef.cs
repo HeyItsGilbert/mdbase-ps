@@ -41,10 +41,14 @@ internal sealed class FieldRef
     }
 
     /// <summary>Checks whether this reference addresses a declared schema property path.</summary>
-    internal static bool DeclaresSchemaProperty(JsonNode schema, string reference)
+    internal static bool DeclaresSchemaProperty(JsonNode schema, string reference) =>
+        DeclaresSchemaProperty(schema, Parse(reference));
+
+    /// <summary>Checks whether a parsed reference addresses a declared schema property path.</summary>
+    internal static bool DeclaresSchemaProperty(JsonNode schema, FieldRef reference)
     {
         JsonNode? current = schema;
-        foreach (var segment in Parse(reference)._segments)
+        foreach (var segment in reference._segments)
         {
             if (current is not JsonObject currentObject)
             {

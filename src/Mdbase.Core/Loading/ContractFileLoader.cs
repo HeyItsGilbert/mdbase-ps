@@ -14,9 +14,24 @@ internal static class ContractFileLoader
 {
     private const string ContractKind = "mdbase.contract";
 
+    private static readonly System.Text.RegularExpressions.Regex ContractIdPattern = new(
+        "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex SemVerPattern = new(
         "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
         System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex ExtensionKeyPattern = new(
+        "^x-[A-Za-z][A-Za-z0-9._:-]{0,127}$",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    internal static bool IsValidContractId(string value) =>
+        value.Length is >= 3 and <= 128 && ContractIdPattern.IsMatch(value);
+
+    internal static bool IsValidSemanticVersion(string value) =>
+        SemVerPattern.IsMatch(value) && !HasLeadingZeroPrereleaseIdentifier(value);
+
+    internal static bool IsExtensionKey(string key) => ExtensionKeyPattern.IsMatch(key);
+
     public static bool IsContractCandidate(OrderedDictionary frontmatter) =>
         frontmatter.Contains("kind") && frontmatter["kind"] is string kind && kind == ContractKind;
 
@@ -24,16 +39,29 @@ internal static class ContractFileLoader
     {
         try
         {
-            if (frontmatter["id"] is not string id || id.Length == 0 ||
-                frontmatter["version"] is not string version || version.Length == 0 ||
-                frontmatter["name"] is not string name || name.Length == 0 ||
+            if (frontmatter["id"] is not string id ||
+                frontmatter["version"] is not string version ||
                 frontmatter["contract_type"] is not string contractTypeText)
             {
-                throw Invalid(relativeFilePath, "must declare non-empty string id, version, name, and contract_type values");
+                throw Invalid(relativeFilePath, "must declare string id, version, and contract_type values");
             }
-            if (!SemVerPattern.IsMatch(version) || HasLeadingZeroPrereleaseIdentifier(version))
+            if (!IsValidContractId(id))
+            {
+                throw Invalid(relativeFilePath, $"has invalid contract id '{id}'");
+            }
+            if (!IsValidSemanticVersion(version))
             {
                 throw Invalid(relativeFilePath, $"has non-SemVer version '{version}'");
+            }
+            var name = frontmatter.Contains("name") ? frontmatter["name"] as string : null;
+            if (frontmatter.Contains("name") && (name is null || name.Length == 0))
+            {
+                throw Invalid(relativeFilePath, "must declare a non-empty string 'name'");
+            }
+            var description = frontmatter.Contains("description") ? frontmatter["description"] as string : null;
+            if (frontmatter.Contains("description") && description is null)
+            {
+                throw Invalid(relativeFilePath, "has a non-string 'description'");
             }
 
             var contractType = contractTypeText switch
@@ -53,7 +81,7 @@ internal static class ContractFileLoader
             foreach (DictionaryEntry entry in frontmatter)
             {
                 var key = (string)entry.Key;
-                if (!allowed.Contains(key) && !key.StartsWith("x-", StringComparison.Ordinal))
+                if (!allowed.Contains(key) && !IsExtensionKey(key))
                 {
                     throw Invalid(relativeFilePath, $"declares '{key}', which does not belong to contract_type '{contractTypeText}'");
                 }
@@ -69,6 +97,7 @@ internal static class ContractFileLoader
                 }
                 if (frontmatter[key] is not OrderedDictionary schemaSection)
                     throw Invalid(relativeFilePath, $"has a non-mapping '{key}'");
+                ValidateSchemaWrapper(schemaSection, relativeFilePath, key);
                 var (schema, node) = TypeFileLoader.CompileSchema(schemaSection, relativeFilePath, collectionRoot);
                 schemas[key] = node;
                 return schema;
@@ -83,8 +112,10 @@ internal static class ContractFileLoader
             var errorSchema = contractType == ContractType.Action ? Compile("error_schema", false) : null;
             var providerSchema = contractType == ContractType.Action ? Compile("provider_schema", false) : null;
             var behavior = contractType == ContractType.Action ? frontmatter["behavior"] as OrderedDictionary : null;
-            if (contractType == ContractType.Action && frontmatter.Contains("behavior") && frontmatter["behavior"] is not OrderedDictionary)
+            if (contractType == ContractType.Action && frontmatter.Contains("behavior") && behavior is null)
+            {
                 throw Invalid(relativeFilePath, "has a non-mapping 'behavior'");
+            }
 
             var digestInput = new JsonObject
             {
@@ -99,7 +130,7 @@ internal static class ContractFileLoader
 
             return new MdbContract
             {
-                Id = id, Version = version, Name = name, Description = frontmatter["description"] as string,
+                Id = id, Version = version, Name = name, Description = description,
                 FilePath = relativeFilePath, ContractType = contractType,
                 RecordSchema = recordSchema, BindingSchema = bindingSchema, DataSchema = dataSchema, SourceSchema = sourceSchema,
                 InputSchema = inputSchema, OutputSchema = outputSchema, ErrorSchema = errorSchema, ProviderSchema = providerSchema,
@@ -117,6 +148,29 @@ internal static class ContractFileLoader
     {
         var canonical = new JsonCanonicalizer(value.ToJsonString()).GetEncodedUTF8();
         return "sha256:" + Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+    }
+
+    private static void ValidateSchemaWrapper(OrderedDictionary schema, string path, string key)
+    {
+        if (schema["dialect"] is not string dialect || dialect != "json-schema-2020-12")
+        {
+            throw Invalid(path, $"has a '{key}' schema wrapper without dialect 'json-schema-2020-12'");
+        }
+
+        var hasValue = schema.Contains("value");
+        var hasRef = schema.Contains("ref");
+        if (hasValue == hasRef || hasValue && schema["value"] is not OrderedDictionary || hasRef && schema["ref"] is not string { Length: > 0 })
+        {
+            throw Invalid(path, $"has an invalid '{key}' schema wrapper");
+        }
+
+        foreach (DictionaryEntry entry in schema)
+        {
+            if (entry.Key is not string wrapperKey || wrapperKey is not ("dialect" or "value" or "ref"))
+            {
+                throw Invalid(path, $"has an invalid '{key}' schema wrapper key");
+            }
+        }
     }
 
     private static bool HasLeadingZeroPrereleaseIdentifier(string version)

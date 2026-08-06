@@ -15,9 +15,9 @@ namespace Mdbase.Core;
 
 /// <summary>
 /// A stateful, in-memory handle to a loaded mdbase collection (spec Ch.01/02; #7 point 5).
-/// <see cref="Connect"/> runs the strict two-phase load decided in #8: phase 1 (type discovery
-/// + compile, including type-registry conflict detection) completes before phase 2 (record
-/// scan, match, construct) starts — never interleaved.
+/// <see cref="Connect"/> runs a strict three-phase load: phase 0 builds the contract registry,
+/// phase 1 compiles the type registry against those contracts, and phase 2 scans and matches
+/// records. Phases never interleave.
 /// </summary>
 public sealed class MdbCollection
 {
@@ -69,7 +69,7 @@ public sealed class MdbCollection
     /// <summary>Returns all types with a validated claim to the exact contract version.</summary>
     public IReadOnlyList<MdbType> GetImplementations(string contractId, string version) =>
         _typesByCanonicalName.Values.Where(type => type.Implements.Any(implementation =>
-            implementation.ContractId == contractId && implementation.ContractVersion == version)).ToArray();
+            implementation.ContractId == contractId && implementation.ContractVersion == version)).OrderBy(type => type.CanonicalName, StringComparer.Ordinal).ToArray();
 
     /// <summary>Builds and validates a record's normalized view through one matching record-contract implementation.</summary>
     public MdbContractView GetContractView(MdbRecord record, MdbType type, string contractId, string version)
@@ -377,7 +377,7 @@ public sealed class MdbCollection
             {
                 Severity = MdbSeverity.Error,
                 Code = "data_contract_conflict",
-                Message = $"Contract '{group.Key.Id}' version '{group.Key.Version}' has conflicting definitions.",
+                Message = $"Data contract conflict for '{group.Key.Id}' version '{group.Key.Version}'.",
                 Details = new Dictionary<string, object?> { ["files"] = definitions.Select(contract => contract.FilePath).ToArray() },
             });
         }

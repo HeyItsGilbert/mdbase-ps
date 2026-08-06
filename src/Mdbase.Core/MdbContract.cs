@@ -19,7 +19,7 @@ public sealed record MdbContract
 {
     public required string Id { get; init; }
     public required string Version { get; init; }
-    public required string Name { get; init; }
+    public string? Name { get; init; }
     public string? Description { get; init; }
     public required string FilePath { get; init; }
     public required ContractType ContractType { get; init; }

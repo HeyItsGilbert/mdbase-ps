@@ -26,6 +26,8 @@ public sealed class ConformanceCase
 
     public required IReadOnlyDictionary<string, string> Types { get; init; }
 
+    public required IReadOnlyDictionary<string, string> Contracts { get; init; }
+
     public required IReadOnlyDictionary<string, string> Files { get; init; }
 
     public override string ToString() => Id ?? $"{GroupName}: {TestName}";
@@ -43,6 +45,7 @@ public sealed class ConformanceCase
             var setup = group["setup"] as OrderedDictionary;
 
             var configYaml = setup?["config"] as string ?? "spec_version: \"0.3.0\"\n";
+            var contracts = ToStringMap(setup?["contracts"] as OrderedDictionary);
             var types = ToStringMap(setup?["types"] as OrderedDictionary);
             var files = ToStringMap(setup?["files"] as OrderedDictionary);
 
@@ -58,6 +61,7 @@ public sealed class ConformanceCase
                     Input = (OrderedDictionary)test["input"]!,
                     Expect = (OrderedDictionary)test["expect"]!,
                     ConfigYaml = configYaml,
+                    Contracts = contracts,
                     Types = types,
                     Files = files,
                 });
