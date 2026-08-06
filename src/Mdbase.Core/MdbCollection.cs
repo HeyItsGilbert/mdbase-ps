@@ -257,6 +257,10 @@ public sealed class MdbCollection
             _linkIndexes.Add(relativePath, newRecord);
         }
 
+        // Resolve and validate outgoing links against the current record snapshot, not the stale
+        // snapshot (or no entry at all for a newly discovered record).
+        _recordsByPath[relativePath] = newRecord;
+
         RemoveOutgoingBacklinks(relativePath);
 
         var result = LinkIndexer.ComputeLinks(newRecord, _linkIndexes, _recordsByPath, Config.Validation);

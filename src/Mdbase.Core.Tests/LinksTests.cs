@@ -404,6 +404,23 @@ public class LinksTests
     }
 
     [Fact]
+    public void Refresh_of_a_new_record_validates_target_type_against_its_new_snapshot()
+    {
+        using var fixture = new TempCollection();
+        fixture.WriteFile("_types/note.md", NoteType("      ref:\n        target_type: person\n"));
+        fixture.WriteFile("_types/person.md", NoteType(string.Empty, typeName: "person"));
+
+        var collection = MdbCollection.Connect(fixture.RootPath);
+        fixture.WriteFile("self.md", "---\ntype: note\nref: self.md\n---\n");
+
+        collection.Refresh("self.md");
+
+        var diagnostic = Assert.Single(collection.Records["self.md"].LinkDiagnostics);
+        Assert.Equal("link_target_type_mismatch", diagnostic.Code);
+        Assert.Equal(MdbSeverity.Error, diagnostic.Severity);
+    }
+
+    [Fact]
     public void Refresh_of_a_type_path_rebuilds_link_diagnostics_for_every_record()
     {
         using var fixture = new TempCollection();
