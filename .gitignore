@@ -4,3 +4,8 @@ Output/
 scratch/
 
 testResults.xml
+
+
+# .NET build output
+bin/
+obj/
