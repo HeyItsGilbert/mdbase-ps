@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Mdbase.Core.Configuration;
 using Mdbase.Core.Discovery;
+using Mdbase.Core.Links;
 using Mdbase.Core.Loading;
 using Mdbase.Core.Matching;
 using Mdbase.Core.Yaml;
@@ -23,6 +24,9 @@ public sealed class MdbCollection
     private readonly Dictionary<string, MdbType> _typesByCanonicalName;
     private readonly Dictionary<string, MdbRecord> _recordsByPath;
     private readonly List<MdbDiagnostic> _diagnostics;
+    private readonly ResolutionIndexes _linkIndexes;
+    private readonly Dictionary<string, List<MdbBacklinkEntry>> _backlinksByTarget = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HashSet<string>> _outgoingTargetsBySource = new(StringComparer.Ordinal);
 
     private MdbCollection(
         string rootPath,
@@ -36,6 +40,7 @@ public sealed class MdbCollection
         _typesByCanonicalName = types;
         _recordsByPath = records;
         _diagnostics = diagnostics;
+        _linkIndexes = new ResolutionIndexes(config.IdField);
     }
 
     /// <summary>Absolute path to the collection root (the directory containing the active `mdbase.yaml`).</summary>
@@ -51,6 +56,17 @@ public sealed class MdbCollection
 
     /// <summary>Registry-level diagnostics: invalid/rejected type files and duplicate type-name conflicts.</summary>
     public IReadOnlyList<MdbDiagnostic> Diagnostics => _diagnostics;
+
+    /// <summary>
+    /// Every resolved, non-ambiguous <see cref="MdbBacklinkEntry"/> whose link targets
+    /// <paramref name="path"/> (#9 point 3 backward index). Empty for a path with no incoming
+    /// resolved links.
+    /// </summary>
+    public IReadOnlyList<MdbBacklinkEntry> GetBacklinks(string path)
+    {
+        var normalized = path.Replace('\\', '/').TrimStart('/');
+        return _backlinksByTarget.TryGetValue(normalized, out var entries) ? entries : Array.Empty<MdbBacklinkEntry>();
+    }
 
     /// <summary>
     /// Opens an mdbase collection at <paramref name="path"/>, running the full two-phase load.
@@ -83,6 +99,8 @@ public sealed class MdbCollection
         {
             collection._recordsByPath[relativePath] = collection.LoadSingleRecord(relativePath);
         }
+
+        collection.RunFullLinkPhase();
 
         return collection;
     }
@@ -121,18 +139,117 @@ public sealed class MdbCollection
         {
             _recordsByPath[relativePath] = LoadSingleRecord(relativePath);
         }
+
+        // A `collection.links` rule change is exactly as blast-radius-everything as a
+        // `read_defaults` change already is — rebuild both resolution dictionaries and the
+        // backward index from scratch (#9's Refresh(typePath) resolution).
+        RunFullLinkPhase();
     }
 
+    /// <summary>
+    /// Patches just this one record's phase-3 state (#9 point 6). Does not retroactively
+    /// re-resolve any other record's previously unresolved or ambiguous links against this
+    /// change — accepted staleness trade-off, see <see cref="Refresh"/>.
+    /// </summary>
     private void RefreshRecord(string relativePath)
     {
         var absolutePath = Path.Combine(RootPath, relativePath);
+        var hadOldRecord = _recordsByPath.TryGetValue(relativePath, out var oldRecord);
+
         if (!File.Exists(absolutePath) || IsReservedOrExcludedRecordPath(relativePath) || !HasRecordExtension(relativePath))
         {
             _recordsByPath.Remove(relativePath);
+            if (hadOldRecord)
+            {
+                RemoveOutgoingBacklinks(relativePath);
+                _linkIndexes.Remove(relativePath, oldRecord!);
+            }
+
             return;
         }
 
-        _recordsByPath[relativePath] = LoadSingleRecord(relativePath);
+        var newRecord = LoadSingleRecord(relativePath);
+
+        if (hadOldRecord)
+        {
+            _linkIndexes.UpdateRecord(relativePath, oldRecord!, newRecord);
+        }
+        else
+        {
+            _linkIndexes.Add(relativePath, newRecord);
+        }
+
+        RemoveOutgoingBacklinks(relativePath);
+
+        var result = LinkIndexer.ComputeLinks(newRecord, _linkIndexes, _recordsByPath, Config.Validation);
+        _recordsByPath[relativePath] = result.Record;
+        InsertOutgoingBacklinks(relativePath, result.Outgoing);
+    }
+
+    /// <summary>Full phase-3 rebuild (#9 point 1): both resolution dictionaries and the backward index, from the current, complete phase-2 record inventory.</summary>
+    private void RunFullLinkPhase()
+    {
+        _linkIndexes.RebuildFull(_recordsByPath);
+        _backlinksByTarget.Clear();
+        _outgoingTargetsBySource.Clear();
+
+        foreach (var relativePath in _recordsByPath.Keys.ToArray())
+        {
+            var result = LinkIndexer.ComputeLinks(_recordsByPath[relativePath], _linkIndexes, _recordsByPath, Config.Validation);
+            _recordsByPath[relativePath] = result.Record;
+            InsertOutgoingBacklinks(relativePath, result.Outgoing);
+        }
+    }
+
+    private void RemoveOutgoingBacklinks(string sourcePath)
+    {
+        if (!_outgoingTargetsBySource.TryGetValue(sourcePath, out var targets))
+        {
+            return;
+        }
+
+        foreach (var target in targets)
+        {
+            if (!_backlinksByTarget.TryGetValue(target, out var entries))
+            {
+                continue;
+            }
+
+            entries.RemoveAll(e => string.Equals(e.SourcePath, sourcePath, StringComparison.Ordinal));
+            if (entries.Count == 0)
+            {
+                _backlinksByTarget.Remove(target);
+            }
+        }
+
+        _outgoingTargetsBySource.Remove(sourcePath);
+    }
+
+    private void InsertOutgoingBacklinks(string sourcePath, IReadOnlyList<OutgoingLink> outgoing)
+    {
+        foreach (var (fieldPath, link) in outgoing)
+        {
+            if (link.ResolvedPath is null || link.IsAmbiguous)
+            {
+                continue;
+            }
+
+            if (!_backlinksByTarget.TryGetValue(link.ResolvedPath, out var entries))
+            {
+                entries = new List<MdbBacklinkEntry>();
+                _backlinksByTarget[link.ResolvedPath] = entries;
+            }
+
+            entries.Add(new MdbBacklinkEntry { SourcePath = sourcePath, FieldPath = fieldPath, Link = link });
+
+            if (!_outgoingTargetsBySource.TryGetValue(sourcePath, out var targets))
+            {
+                targets = new HashSet<string>(StringComparer.Ordinal);
+                _outgoingTargetsBySource[sourcePath] = targets;
+            }
+
+            targets.Add(link.ResolvedPath);
+        }
     }
 
     private static Dictionary<string, MdbType> BuildTypeRegistry(string root, MdbCollectionConfig config, List<MdbDiagnostic> diagnostics)

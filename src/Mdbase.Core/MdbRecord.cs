@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using Mdbase.Core.Links;
 
 namespace Mdbase.Core;
 
@@ -37,4 +38,25 @@ public sealed record MdbRecord
 
     /// <summary>`type_conflict` diagnostics from composing `collection.read_defaults` across <see cref="MatchedTypes"/> (#34).</summary>
     public required IReadOnlyList<MdbDiagnostic> CompositionDiagnostics { get; init; }
+
+    /// <summary>
+    /// `file.links` (spec Ch.08 "Body Links"): frontmatter link fields declared via matched
+    /// types' `collection.links`, plus body wikilinks and body Markdown links. Filled in during
+    /// phase 3; ordinary phase-2 construction leaves this empty.
+    /// </summary>
+    public required IReadOnlyList<MdbLink> Links { get; init; }
+
+    /// <summary>`file.embeds`: Markdown and wikilink embed occurrences, kept separate from <see cref="Links"/>.</summary>
+    public required IReadOnlyList<MdbLink> Embeds { get; init; }
+
+    /// <summary>`file.tags`: de-duplicated frontmatter `tags` (string or list of strings) plus inline body tags.</summary>
+    public required IReadOnlyList<string> Tags { get; init; }
+
+    /// <summary>
+    /// `validate_exists`/`target_type` and ambiguous-link findings for this record's own
+    /// outgoing links (spec Ch.08 "Target Constraints"). Kept distinct from
+    /// <see cref="ValidationDiagnostics"/> (JSON Schema only) and <see cref="CompositionDiagnostics"/>
+    /// (`type_conflict` only), so each diagnostic's producing stage stays traceable.
+    /// </summary>
+    public required IReadOnlyList<MdbDiagnostic> LinkDiagnostics { get; init; }
 }

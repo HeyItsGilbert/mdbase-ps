@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using Json.Schema;
+using Mdbase.Core.Links;
 using Mdbase.Core.Matching;
 
 namespace Mdbase.Core;
@@ -29,10 +30,13 @@ public sealed record MdbType
     /// <summary>Decomposed `collection.read_defaults` — effective read/query values for fields missing on a record.</summary>
     public IReadOnlyDictionary<string, object?> ReadDefaults { get; init; } = new Dictionary<string, object?>();
 
+    /// <summary>Decomposed `collection.links` — per-field link rules (spec Ch.07 "Links"), keyed by field reference.</summary>
+    public IReadOnlyDictionary<string, LinkFieldRule> LinkRules { get; init; } = new Dictionary<string, LinkFieldRule>();
+
     /// <summary>
-    /// The raw `collection` mapping, undecomposed beyond <see cref="ReadDefaults"/>. `links`,
-    /// `path`, `unique`, `display`, and `projections` stay raw blobs — their own future specs
-    /// (Links, Core Write, Query) own decomposing them.
+    /// The raw `collection` mapping, undecomposed beyond <see cref="ReadDefaults"/> and
+    /// <see cref="LinkRules"/>. `path`, `unique`, `display`, and `projections` stay raw blobs —
+    /// their own future specs (Core Write, Query) own decomposing them.
     /// </summary>
     public OrderedDictionary? CollectionSection { get; init; }
 

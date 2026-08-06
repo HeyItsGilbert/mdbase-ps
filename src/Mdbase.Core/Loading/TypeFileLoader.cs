@@ -3,6 +3,7 @@ using System.Collections.Specialized;
 using System.Text.Json.Nodes;
 using Json.Schema;
 using Mdbase.Core.Json;
+using Mdbase.Core.Links;
 using Mdbase.Core.Matching;
 using Mdbase.Core.Yaml;
 
@@ -63,6 +64,8 @@ internal static class TypeFileLoader
             _ => throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-mapping 'collection.read_defaults'."),
         };
 
+        var linkRules = ParseLinkRules(collectionSection, relativeFilePath);
+
         return new MdbType
         {
             Name = name,
@@ -71,8 +74,44 @@ internal static class TypeFileLoader
             Schema = schema,
             Match = match,
             ReadDefaults = readDefaults,
+            LinkRules = linkRules,
             CollectionSection = collectionSection,
         };
+    }
+
+    private static IReadOnlyDictionary<string, LinkFieldRule> ParseLinkRules(OrderedDictionary? collectionSection, string relativeFilePath)
+    {
+        if (collectionSection?["links"] is not OrderedDictionary linksSection)
+        {
+            if (collectionSection?.Contains("links") == true && collectionSection["links"] is not null)
+            {
+                throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-mapping 'collection.links'.");
+            }
+
+            return new Dictionary<string, LinkFieldRule>();
+        }
+
+        var rules = new Dictionary<string, LinkFieldRule>();
+        foreach (DictionaryEntry entry in linksSection)
+        {
+            var fieldPath = (string)entry.Key;
+            if (entry.Value is not OrderedDictionary ruleMap)
+            {
+                throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-mapping 'collection.links.{fieldPath}'.");
+            }
+
+            var targetType = ruleMap.Contains("target_type") ? ruleMap["target_type"] as string : null;
+            var validateExists = ruleMap.Contains("validate_exists") && ruleMap["validate_exists"] is bool b && b;
+
+            rules[fieldPath] = new LinkFieldRule
+            {
+                FieldPath = fieldPath,
+                TargetType = targetType,
+                ValidateExists = validateExists,
+            };
+        }
+
+        return rules;
     }
 
     private static JsonSchema CompileSchema(OrderedDictionary schemaSection, string relativeFilePath, string collectionRoot)

@@ -4,6 +4,7 @@ using System.Text.Json;
 using Json.Schema;
 using Mdbase.Core.Compose;
 using Mdbase.Core.Json;
+using Mdbase.Core.Links;
 
 namespace Mdbase.Core.Loading;
 
@@ -46,6 +47,19 @@ internal static class RecordLoader
             DeepEqualityComparer,
             relativePath);
 
+        // Composed again (discarding the diagnostics side) by LinkIndexer in phase 3, once the
+        // full record inventory is available for resolution — MdbRecord has no field to cache
+        // the coalesced rules across phases, and re-composing per record load/refresh is cheap.
+        var (_, linkRuleConflicts) = TypeConflictComposer.Compose(
+            matchedTypes,
+            type => type.LinkRules,
+            EqualityComparer<LinkFieldRule>.Default,
+            relativePath);
+        if (linkRuleConflicts.Count > 0)
+        {
+            compositionDiagnostics = compositionDiagnostics.Concat(linkRuleConflicts).ToList();
+        }
+
         var effective = Clone(rawFrontmatter);
         foreach (var (key, value) in coalesced)
         {
@@ -66,6 +80,12 @@ internal static class RecordLoader
             IsValid = isValid,
             ValidationDiagnostics = validationDiagnostics,
             CompositionDiagnostics = compositionDiagnostics,
+            // Filled in during MdbCollection's phase 3 (#9); a phase-2-only snapshot never
+            // escapes MdbCollection.LoadSingleRecord before phase 3 replaces it.
+            Links = Array.Empty<MdbLink>(),
+            Embeds = Array.Empty<MdbLink>(),
+            Tags = Array.Empty<string>(),
+            LinkDiagnostics = Array.Empty<MdbDiagnostic>(),
         };
     }
 
