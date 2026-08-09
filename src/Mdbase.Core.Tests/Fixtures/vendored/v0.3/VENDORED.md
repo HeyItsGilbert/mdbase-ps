@@ -28,13 +28,17 @@ consistency — not `Mdbase.Core`'s behavior. `core_collection`'s tests use `val
 ## Excluded individual cases
 
 `core_collection` itself reaches slightly past this spec's scope (issue #37 explicitly defers
-Links, Core Write, and cross-file Uniqueness to their own future specs). `ConformanceFixtureRunner`
+Core Write and cross-file Uniqueness to their own future specs). `ConformanceFixtureRunner`
 skips exactly these cases, each for a named reason:
 
 - the whole "path policy and create behavior" group (`operation: create` — Core Write, #11/#12)
 - `collection.uniqueness` (`collection.unique` — Collection Semantics' own future decomposition)
-- "collection links resolve valid ID-based link" / "collection links enforce validate_exists"
-  (Links, #9)
+
+"collection links resolve valid ID-based link" and "collection links enforce validate_exists"
+(Links, #9/#38) now run for real. The vendored fixture's `link_not_found` code and combined
+`valid` flag are matched by folding `MdbRecord.LinkDiagnostics` alongside `ValidationDiagnostics`
+in the runner's assertion helper — `MdbRecord.IsValid` itself stays schema-only by design (#38
+keeps link diagnostics traceable to their own pipeline stage).
 
 Every other case in the file runs for real against `Mdbase.Core`.
 

@@ -8,7 +8,7 @@ namespace Mdbase.Core.Tests.Conformance;
 /// Data-driven runner for the vendored `core_collection` v0.3 conformance fixture group
 /// (#14/#30's Testing Decisions), driving `Mdbase.Core` directly through `MdbCollection`.
 /// See `Fixtures/vendored/v0.3/VENDORED.md` for provenance and the excluded-case list — this
-/// spec's engine doesn't implement Links, Core Write, or cross-file Uniqueness yet.
+/// spec's engine doesn't implement Core Write or cross-file Uniqueness yet.
 /// </summary>
 public class CoreCollectionConformanceTests
 {
@@ -21,8 +21,6 @@ public class CoreCollectionConformanceTests
     private static readonly HashSet<string> ExcludedByName = new()
     {
         "collection unique detects duplicate ids",
-        "collection links resolve valid ID-based link",
-        "collection links enforce validate_exists",
     };
 
     public static IEnumerable<object[]> Cases()
@@ -82,11 +80,17 @@ public class CoreCollectionConformanceTests
         var record = collection.Records[path];
         var expectedValid = (bool)testCase.Expect["valid"]!;
 
-        Assert.Equal(expectedValid, record.IsValid);
+        // The vendored operation's `valid` combines every diagnostic source (schema, plus #9's
+        // link-target constraints); `MdbRecord.IsValid` stays schema-only by design (#38 keeps
+        // `LinkDiagnostics` distinct from `ValidationDiagnostics`), so the adapter folds
+        // error-severity link diagnostics in here rather than on the Core type itself.
+        var hasErrorLinkDiagnostic = record.LinkDiagnostics.Any(d => d.Severity == MdbSeverity.Error);
+        Assert.Equal(expectedValid, record.IsValid && !hasErrorLinkDiagnostic);
 
+        var allDiagnostics = record.ValidationDiagnostics.Concat(record.LinkDiagnostics).ToArray();
         if (testCase.Expect["issues"] is object?[] { Length: 0 })
         {
-            Assert.Empty(record.ValidationDiagnostics);
+            Assert.Empty(allDiagnostics);
         }
         else if (testCase.Expect["issues"] is object?[] issues)
         {
@@ -96,7 +100,7 @@ public class CoreCollectionConformanceTests
                 var code = (string)issue["code"]!;
                 var field = issue["field"] as string;
                 Assert.Contains(
-                    record.ValidationDiagnostics,
+                    allDiagnostics,
                     d => d.Code == code && (field is null || d.Field == field));
             }
         }
@@ -104,6 +108,18 @@ public class CoreCollectionConformanceTests
         if (testCase.Expect["types"] is object?[] expectedTypes)
         {
             Assert.Equal(expectedTypes.Cast<string>(), record.MatchedTypes.Select(t => t.Name));
+        }
+
+        if (testCase.Expect["resolved_links"] is OrderedDictionary resolvedLinks)
+        {
+            foreach (DictionaryEntry entry in resolvedLinks)
+            {
+                var fieldName = (string)entry.Key;
+                var expectedTarget = (string)entry.Value!;
+                Assert.Contains(
+                    collection.GetBacklinks(expectedTarget),
+                    backlink => backlink.SourcePath == path && backlink.FieldPath == fieldName);
+            }
         }
     }
 

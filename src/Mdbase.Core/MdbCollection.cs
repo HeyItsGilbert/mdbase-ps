@@ -120,7 +120,10 @@ public sealed class MdbCollection
     }
 
     /// <summary>
-    /// Opens an mdbase collection at <paramref name="path"/>, running the full two-phase load.
+    /// Opens an mdbase collection at <paramref name="path"/>, running the full three-phase load:
+    /// phase 0 builds the contract registry, phase 1 compiles the type registry, phase 2 scans
+    /// and matches records, and phase 3 (#9) parses and resolves every link/tag into the
+    /// returned collection's backward index.
     /// </summary>
     /// <exception cref="MdbCollectionNotFoundException">No `mdbase.yaml` was found at <paramref name="path"/>.</exception>
     public static MdbCollection Connect(string path)
@@ -158,8 +161,12 @@ public sealed class MdbCollection
     }
 
     /// <summary>
-    /// point 7): a record-path change patches just that record; a type- or contract-path change
-    /// rebuilds the applicable registry and re-runs matching for every already-indexed record.
+    /// Patches derived state for one changed path (#9 point 7): a record-path change patches
+    /// just that record's phase-3 state; a type- or contract-path change rebuilds the applicable
+    /// registry, re-runs matching for every already-indexed record, and fully rebuilds phase 3.
+    /// A record-path refresh does not retroactively re-resolve other records' previously
+    /// unresolved or ambiguous links against the just-changed record (#9 point 6's accepted
+    /// staleness trade-off) — only <see cref="Refresh"/> that other record to pick up the change.
     /// </summary>
     public void Refresh(string relativePath)
     {

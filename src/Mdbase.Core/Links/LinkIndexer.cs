@@ -180,7 +180,7 @@ internal static class LinkIndexer
             diagnostics.Add(new MdbDiagnostic
             {
                 Severity = severity,
-                Code = "link_unresolved",
+                Code = "link_not_found",
                 Message = $"Link field '{fieldPath}' target '{link.Target}' did not resolve to a record.",
                 Path = recordPath,
                 Field = fieldPath,

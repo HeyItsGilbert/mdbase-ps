@@ -228,7 +228,7 @@ public class LinksTests
 
         var errorCollection = MdbCollection.Connect(fixture.RootPath);
         var errorDiag = Assert.Single(errorCollection.Records["a.md"].LinkDiagnostics);
-        Assert.Equal("link_unresolved", errorDiag.Code);
+        Assert.Equal("link_not_found", errorDiag.Code);
         Assert.Equal(MdbSeverity.Error, errorDiag.Severity);
 
         fixture.WriteFile("mdbase.yaml", "spec_version: \"0.3.0\"\nsettings:\n  validation: warn\n");
@@ -295,7 +295,7 @@ public class LinksTests
     }
 
     [Fact]
-    public void Ambiguous_target_on_a_validate_exists_field_still_reports_link_unresolved_at_the_configured_severity()
+    public void Ambiguous_target_on_a_validate_exists_field_still_reports_link_not_found_at_the_configured_severity()
     {
         using var fixture = new TempCollection();
         fixture.WriteFile("_types/note.md", NoteType("      ref:\n        validate_exists: true\n"));
@@ -307,7 +307,7 @@ public class LinksTests
         var diagnostics = collection.Records["a.md"].LinkDiagnostics;
 
         Assert.Contains(diagnostics, d => d.Code == "ambiguous_link" && d.Severity == MdbSeverity.Warning);
-        Assert.Contains(diagnostics, d => d.Code == "link_unresolved" && d.Severity == MdbSeverity.Error);
+        Assert.Contains(diagnostics, d => d.Code == "link_not_found" && d.Severity == MdbSeverity.Error);
     }
 
     [Fact]
@@ -434,7 +434,7 @@ public class LinksTests
         collection.Refresh("_types/note.md");
 
         var diag = Assert.Single(collection.Records["a.md"].LinkDiagnostics);
-        Assert.Equal("link_unresolved", diag.Code);
+        Assert.Equal("link_not_found", diag.Code);
     }
 
     private static string NoteType(string linksYaml, string typeName = "note") => $"""
