@@ -19,7 +19,7 @@ namespace Mdbase.Core;
 /// phase 1 compiles the type registry against those contracts, and phase 2 scans and matches
 /// records. Phases never interleave.
 /// </summary>
-public sealed class MdbCollection
+public sealed partial class MdbCollection
 {
     private const string DefaultRuntimeExcludedName1 = ".git";
     private const string DefaultRuntimeExcludedName2 = "node_modules";
@@ -636,69 +636,132 @@ public sealed class MdbCollection
         var presentKeys = Config.ExplicitTypeKeys.Where(frontmatter.Contains).ToArray();
         if (presentKeys.Length > 0)
         {
-            var names = new List<string>();
-            foreach (var key in presentKeys)
-            {
-                var value = frontmatter[key];
-                var declared = value switch
-                {
-                    string s => new[] { s },
-                    object?[] arr when arr.Length > 0 && arr.All(i => i is string) => arr.Select(i => (string)i!).ToArray(),
-                    _ => null,
-                };
-
-                if (declared is null)
-                {
-                    diagnostics.Add(new MdbDiagnostic
-                    {
-                        Severity = MdbSeverity.Error,
-                        Code = "type_invalid",
-                        Message = $"Explicit type key '{key}' must be a type-name string or a non-empty list of type-name strings.",
-                        Path = relativePath,
-                        Field = key,
-                    });
-                    continue;
-                }
-
-                names.AddRange(declared);
-            }
-
-            var deduped = new List<string>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var name in names)
-            {
-                if (seen.Add(name))
-                {
-                    deduped.Add(name);
-                }
-            }
-
-            var resolved = new List<MdbType>();
-            foreach (var name in deduped)
-            {
-                if (_typesByCanonicalName.TryGetValue(name.ToLowerInvariant(), out var type))
-                {
-                    resolved.Add(type);
-                }
-                else
-                {
-                    diagnostics.Add(new MdbDiagnostic
-                    {
-                        Severity = MdbSeverity.Error,
-                        Code = "type_invalid",
-                        Message = $"Explicit type declaration '{name}' does not match any type in the registry.",
-                        Path = relativePath,
-                    });
-                }
-            }
-
-            return resolved;
+            return ResolveExplicitTypeDeclarations(relativePath, frontmatter, presentKeys, diagnostics);
         }
 
         var file = Cel.MdbFileCel.Build(RootPath, relativePath, body);
-        return _typesByCanonicalName.Values
+        return ResolveInferredMatchedTypes(relativePath, frontmatter, file, matchDiagnostics);
+    }
+
+    /// <summary>
+    /// Resolves the explicit-type-key branch of the matching decision process (spec Ch.07):
+    /// declared names, de-duplicated case-insensitively while retaining declaration order, each
+    /// looked up against the type registry. An unresolved name or malformed key value appends a
+    /// non-terminating `type_invalid` diagnostic — the read path tolerates it (the record is
+    /// simply untyped for that key); write callers (<see cref="ResolveTypesForWrite"/>) turn a
+    /// non-empty diagnostics list into a hard <see cref="MdbWriteException"/>.
+    /// </summary>
+    private IReadOnlyList<MdbType> ResolveExplicitTypeDeclarations(
+        string relativePath, OrderedDictionary frontmatter, IReadOnlyList<string> presentKeys, List<MdbDiagnostic> diagnostics)
+    {
+        var names = new List<string>();
+        foreach (var key in presentKeys)
+        {
+            var value = frontmatter[key];
+            var declared = value switch
+            {
+                string s => new[] { s },
+                object?[] arr when arr.Length > 0 && arr.All(i => i is string) => arr.Select(i => (string)i!).ToArray(),
+                _ => null,
+            };
+
+            if (declared is null)
+            {
+                diagnostics.Add(new MdbDiagnostic
+                {
+                    Severity = MdbSeverity.Error,
+                    Code = "type_invalid",
+                    Message = $"Explicit type key '{key}' must be a type-name string or a non-empty list of type-name strings.",
+                    Path = relativePath,
+                    Field = key,
+                });
+                continue;
+            }
+
+            names.AddRange(declared);
+        }
+
+        var deduped = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in names)
+        {
+            if (seen.Add(name))
+            {
+                deduped.Add(name);
+            }
+        }
+
+        var resolved = new List<MdbType>();
+        foreach (var name in deduped)
+        {
+            if (_typesByCanonicalName.TryGetValue(name.ToLowerInvariant(), out var type))
+            {
+                resolved.Add(type);
+            }
+            else
+            {
+                diagnostics.Add(new MdbDiagnostic
+                {
+                    Severity = MdbSeverity.Error,
+                    Code = "type_invalid",
+                    Message = $"Explicit type declaration '{name}' does not match any type in the registry.",
+                    Path = relativePath,
+                });
+            }
+        }
+
+        return resolved;
+    }
+
+    /// <summary>Resolves the inferred-match branch of the matching decision process (spec Ch.07), ordered by canonical lower-case type name.</summary>
+    private IReadOnlyList<MdbType> ResolveInferredMatchedTypes(
+        string relativePath, OrderedDictionary frontmatter, Cel.MdbFileCel file, List<MdbDiagnostic> matchDiagnostics) =>
+        _typesByCanonicalName.Values
             .Where(t => t.Match.Matches(relativePath, frontmatter, file, t.Name, matchDiagnostics))
             .OrderBy(t => t.CanonicalName, StringComparer.Ordinal)
             .ToList();
+
+    /// <summary>
+    /// Write-time type resolution (spec Ch.05 "Write-Time Type Membership"; #41 point 2): an
+    /// explicit caller-supplied <paramref name="explicitTypes"/> list takes precedence (each name
+    /// validated against the registry, retaining caller order after case-insensitive de-dupe);
+    /// otherwise falls back to the draft's own explicit type key(s), then inferred matching — the
+    /// exact same precedence a read uses. Any resolution diagnostic is a hard write failure.
+    /// </summary>
+    private IReadOnlyList<MdbType> ResolveTypesForWrite(IReadOnlyList<string>? explicitTypes, OrderedDictionary draftFields, string relativePathForDiagnostics, string body)
+    {
+        var diagnostics = new List<MdbDiagnostic>();
+        IReadOnlyList<MdbType> resolved;
+        if (explicitTypes is { Count: > 0 })
+        {
+            resolved = ResolveExplicitTypeDeclarations(relativePathForDiagnostics, WrapExplicitTypes(explicitTypes), new[] { "type" }, diagnostics);
+        }
+        else
+        {
+            var presentKeys = Config.ExplicitTypeKeys.Where(draftFields.Contains).ToArray();
+            if (presentKeys.Length > 0)
+            {
+                resolved = ResolveExplicitTypeDeclarations(relativePathForDiagnostics, draftFields, presentKeys, diagnostics);
+            }
+            else
+            {
+                var file = Cel.MdbFileCel.Build(RootPath, relativePathForDiagnostics, body);
+                resolved = ResolveInferredMatchedTypes(relativePathForDiagnostics, draftFields, file, diagnostics);
+            }
+        }
+
+        if (diagnostics.Count > 0)
+        {
+            throw new MdbWriteException(diagnostics[0]);
+        }
+
+        return resolved;
+    }
+
+    /// <summary>Wraps a caller-supplied explicit type-name list as a one-key frontmatter mapping so it can reuse <see cref="ResolveExplicitTypeDeclarations"/> verbatim.</summary>
+    private static OrderedDictionary WrapExplicitTypes(IReadOnlyList<string> explicitTypes)
+    {
+        var wrapper = new OrderedDictionary { ["type"] = explicitTypes.Count == 1 ? explicitTypes[0] : explicitTypes.Cast<object?>().ToArray() };
+        return wrapper;
     }
 }

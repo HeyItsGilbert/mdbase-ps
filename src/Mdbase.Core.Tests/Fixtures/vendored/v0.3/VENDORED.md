@@ -27,18 +27,24 @@ consistency — not `Mdbase.Core`'s behavior. `core_collection`'s tests use `val
 
 ## Excluded individual cases
 
-`core_collection` itself reaches slightly past this spec's scope (issue #37 explicitly defers
-Core Write and cross-file Uniqueness to their own future specs). `ConformanceFixtureRunner`
-skips exactly these cases, each for a named reason:
+`ConformanceFixtureRunner` skips exactly one case, for a named reason:
 
-- the whole "path policy and create behavior" group (`operation: create` — Core Write, #11/#12)
-- `collection.uniqueness` (`collection.unique` — Collection Semantics' own future decomposition)
+- `collection unique detects duplicate ids` — this fixture case drives `collection.unique`
+  through the read-side `validate` operation (detecting a duplicate already on disk at
+  connect/read time), which is not part of #41's write-scoped `collection.unique`
+  decomposition (`MdbCollection.Create`/`Update` reject a duplicate before writing; nothing
+  wires a `duplicate_value` diagnostic onto `MdbRecord.ValidationDiagnostics` at read time).
 
 "collection links resolve valid ID-based link" and "collection links enforce validate_exists"
-(Links, #9/#38) now run for real. The vendored fixture's `link_not_found` code and combined
+(Links, #9/#38) run for real. The vendored fixture's `link_not_found` code and combined
 `valid` flag are matched by folding `MdbRecord.LinkDiagnostics` alongside `ValidationDiagnostics`
 in the runner's assertion helper — `MdbRecord.IsValid` itself stays schema-only by design (#38
 keeps link diagnostics traceable to their own pipeline stage).
+
+The "path policy and create behavior" group (`operation: create`) now runs for real too (#41):
+`create uses collection path pattern when path is omitted` exercises `MdbCollection.Create`'s
+path-pattern generation, and `path policy rejects traversal` exercises the boundary check
+(`path_traversal`, matching the fixture's own expected diagnostic code).
 
 Every other case in the file runs for real against `Mdbase.Core`.
 
@@ -65,3 +71,13 @@ and the fixture's workflow cases and `file.hasTag` case are outside #40's
 scope. Their record-query behavior is covered by the executable query and
 membership cases; the matching host bindings are also covered by the
 hand-written public-seam tests.
+
+## Lifecycle
+
+Source: `tests/v0.3/lifecycle/lifecycle.yaml` at commit
+`02388190b9287954139d7feac49d0e3e10c44cfe` (2026-08-03). The full fixture is copied under
+`lifecycle/` so the suite remains an offline, dated snapshot (#41's Testing Decisions).
+`LifecycleConformanceTests` runs every `create`/`update`/`read` case through
+`MdbCollection.Create`/`Update`/`Records` — standard-provider coverage (`ulid`, `slugify`,
+`now`), read-defaults-never-materialized-by-lifecycle, guarded actions (pass/skip), and a
+cross-type lifecycle `type_conflict`.

@@ -16,10 +16,12 @@ public class CoreCollectionConformanceTests
         AppContext.BaseDirectory, "Fixtures", "vendored", "v0.3", "core", "core-collection.yaml");
 
     /// <summary>Test names/ids this spec's engine does not yet cover — see VENDORED.md for why.</summary>
-    private static readonly HashSet<string> ExcludedByOperation = new() { "create" };
+    private static readonly HashSet<string> ExcludedByOperation = new();
 
     private static readonly HashSet<string> ExcludedByName = new()
     {
+        // Read-time (`validate`) duplicate detection is not part of #41's write-scoped
+        // `collection.unique` decomposition — see VENDORED.md.
         "collection unique detects duplicate ids",
     };
 
@@ -68,9 +70,37 @@ public class CoreCollectionConformanceTests
             case "get_type":
                 AssertGetType(collection, testCase);
                 break;
+            case "create":
+                AssertCreate(collection, testCase);
+                break;
             default:
                 Assert.Fail($"Conformance case '{testCase}' uses unsupported operation '{testCase.Operation}'.");
                 break;
+        }
+    }
+
+    private static void AssertCreate(MdbCollection collection, ConformanceCase testCase)
+    {
+        var frontmatter = (OrderedDictionary)testCase.Input["frontmatter"]!;
+        var type = testCase.Input["type"] as string;
+        var explicitPath = testCase.Input["path"] as string;
+        var expectedValid = (bool)testCase.Expect["valid"]!;
+
+        try
+        {
+            var record = collection.Create(frontmatter, types: type is null ? null : new[] { type }, path: explicitPath);
+            Assert.True(expectedValid, "Expected create to fail but it succeeded.");
+            if (testCase.Expect["path"] is string expectedPath)
+            {
+                Assert.Equal(expectedPath, record.FileInfo.Path);
+            }
+        }
+        catch (MdbWriteException ex) when (!expectedValid)
+        {
+            if (testCase.Expect["error"] is OrderedDictionary error && error["code"] is string expectedCode)
+            {
+                Assert.Equal(expectedCode, ex.Diagnostic.Code);
+            }
         }
     }
 

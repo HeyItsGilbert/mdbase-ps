@@ -146,7 +146,7 @@ internal static class RecordLoader
         };
     }
 
-    private static (bool IsValid, IReadOnlyList<MdbDiagnostic> Diagnostics) ValidateSchemas(
+    internal static (bool IsValid, IReadOnlyList<MdbDiagnostic> Diagnostics) ValidateSchemas(
         OrderedDictionary rawFrontmatter, string relativePath, IReadOnlyList<MdbType> matchedTypes)
     {
         var element = JsonModel.ToJsonNode(rawFrontmatter)!.Deserialize<JsonElement>();

@@ -76,6 +76,29 @@ internal sealed class CelExpressionContext
         CelHostFunctions.FileTypeProvider,
         CelHostFunctions.FileTypeProvider);
 
+    /// <summary>
+    /// Lifecycle guard expressions (Ch.09/Ch.10 "Lifecycle Context"): current draft fields at
+    /// top level, plus `record`/`raw` (both alias the draft — no separate effective layer
+    /// exists during a write), `present` (draft-only raw/record presence), `old` (previous raw
+    /// frontmatter on update, an empty map on create), `operation`, and `file` (unavailable
+    /// during `on_create` when the target path is deferred to post-lifecycle pattern
+    /// generation — #41 point 39). A minimal, purpose-built guard-only binding distinct from
+    /// <see cref="Match"/>/<see cref="Query"/>'s <c>MdbActivation</c> — see
+    /// <c>Cel.LifecycleGuardActivation</c>.
+    /// </summary>
+    public static readonly CelExpressionContext Lifecycle = new(
+        new VariableDecl[]
+        {
+            new("record", CelType.MapDyn),
+            new("raw", CelType.MapDyn),
+            new("present", CelType.MapDyn),
+            new("old", CelType.MapDyn),
+            new("operation", CelType.MapDyn),
+            new("file", CelType.Struct("MdbFileCel")),
+        },
+        CelHostFunctions.FileTypeProvider,
+        CelHostFunctions.FileTypeProvider);
+
     /// <summary>Custom `summary_functions` (Ch.11 "Grouping And Summaries"): the one reserved name is `values`, the ordered per-group column.</summary>
     public static readonly CelExpressionContext Summary = new(
         new VariableDecl[] { new("values", CelType.ListDyn) },
@@ -121,6 +144,7 @@ internal sealed class CelExpressionContext
         var referencedTopLevelFields = CelAstScan.SelectFields(parsed.Ast!.Expr, "record")
             .Concat(CelAstScan.SelectFields(parsed.Ast!.Expr, "raw"))
             .Concat(CelAstScan.SelectFields(parsed.Ast!.Expr, "note"))
+            .Concat(CelAstScan.SelectFields(parsed.Ast!.Expr, "old"))
             .Concat(CelAstScan.NestedSelectFields(parsed.Ast!.Expr, "this", "record"))
             .Concat(CelAstScan.NestedSelectFields(parsed.Ast!.Expr, "this", "raw"))
             .Concat(CelAstScan.NestedSelectFields(parsed.Ast!.Expr, "this", "note"))

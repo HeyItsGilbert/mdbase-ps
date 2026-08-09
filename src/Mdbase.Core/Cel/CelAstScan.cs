@@ -43,4 +43,8 @@ internal static class CelAstScan
 
         return result;
     }
+
+    /// <summary>True when the expression references the bare identifier `&lt;name&gt;` anywhere (e.g. a lifecycle guard's use of `file`).</summary>
+    public static bool ReferencesIdentifier(Expr root, string name) =>
+        AstTools.DescendantsAndSelf(root).Any(node => node is IdentExpr ident && ident.Name == name);
 }

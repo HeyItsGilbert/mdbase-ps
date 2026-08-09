@@ -8,6 +8,7 @@ using Mdbase.Core.Compose;
 using Mdbase.Core.Json;
 using Mdbase.Core.Links;
 using Mdbase.Core.Matching;
+using Mdbase.Core.Write;
 using Mdbase.Core.Yaml;
 
 namespace Mdbase.Core.Loading;
@@ -71,6 +72,10 @@ internal static class TypeFileLoader
         var linkRules = ParseLinkRules(collectionSection, relativeFilePath);
         var (projectionSources, compiledProjections) = ParseProjections(collectionSection, relativeFilePath);
         var implementations = ParseImplements(frontmatter, relativeFilePath, contracts, schemaNode);
+        var lifecycleSection = frontmatter["lifecycle"] as OrderedDictionary;
+        var (lifecycleOnCreate, lifecycleOnUpdate) = LifecycleSectionLoader.Parse(lifecycleSection, relativeFilePath);
+        var pathPattern = PathUniqueSectionLoader.ParsePathPattern(collectionSection, relativeFilePath);
+        var uniqueRules = PathUniqueSectionLoader.ParseUniqueRules(collectionSection, relativeFilePath);
 
         return new MdbType
         {
@@ -78,6 +83,8 @@ internal static class TypeFileLoader
             ReadDefaults = readDefaults, LinkRules = linkRules, CollectionSection = collectionSection,
             ProjectionSources = projectionSources, CompiledProjections = compiledProjections,
             Implements = implementations,
+            LifecycleOnCreate = lifecycleOnCreate, LifecycleOnUpdate = lifecycleOnUpdate,
+            PathPattern = pathPattern, Unique = uniqueRules,
         };
     }
 
