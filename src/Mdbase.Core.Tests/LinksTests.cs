@@ -254,6 +254,32 @@ public class LinksTests
     }
 
     [Fact]
+    public void A_non_string_target_type_fails_the_type_file_with_a_type_invalid_diagnostic()
+    {
+        using var fixture = new TempCollection();
+        fixture.WriteFile("_types/note.md", NoteType("      ref:\n        target_type: [person]\n"));
+        fixture.WriteFile("a.md", "---\ntype: note\nref: \"person.md\"\n---\n");
+
+        var collection = MdbCollection.Connect(fixture.RootPath);
+
+        Assert.Empty(collection.Types);
+        Assert.Contains(collection.Diagnostics, d => d.Code == "type_invalid" && d.Path == "_types/note.md");
+    }
+
+    [Fact]
+    public void A_non_boolean_validate_exists_fails_the_type_file_with_a_type_invalid_diagnostic()
+    {
+        using var fixture = new TempCollection();
+        fixture.WriteFile("_types/note.md", NoteType("      ref:\n        validate_exists: \"yes\"\n"));
+        fixture.WriteFile("a.md", "---\ntype: note\nref: \"missing.md\"\n---\n");
+
+        var collection = MdbCollection.Connect(fixture.RootPath);
+
+        Assert.Empty(collection.Types);
+        Assert.Contains(collection.Diagnostics, d => d.Code == "type_invalid" && d.Path == "_types/note.md");
+    }
+
+    [Fact]
     public void Array_link_field_declared_with_bracket_suffix_applies_the_rule_item_wise()
     {
         using var fixture = new TempCollection();

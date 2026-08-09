@@ -178,8 +178,18 @@ internal static class TypeFileLoader
                 throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-mapping 'collection.links.{fieldPath}'.");
             }
 
-            var targetType = ruleMap.Contains("target_type") ? ruleMap["target_type"] as string : null;
-            var validateExists = ruleMap.Contains("validate_exists") && ruleMap["validate_exists"] is bool b && b;
+            if (ruleMap.Contains("target_type") && ruleMap["target_type"] is not string and not null)
+            {
+                throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-string 'collection.links.{fieldPath}.target_type'.");
+            }
+
+            if (ruleMap.Contains("validate_exists") && ruleMap["validate_exists"] is not bool and not null)
+            {
+                throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-boolean 'collection.links.{fieldPath}.validate_exists'.");
+            }
+
+            var targetType = ruleMap["target_type"] as string;
+            var validateExists = ruleMap["validate_exists"] is true;
 
             rules[fieldPath] = new LinkFieldRule
             {
