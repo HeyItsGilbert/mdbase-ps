@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using Json.Schema;
+using Mdbase.Core.Compose;
 using Mdbase.Core.Links;
 using Mdbase.Core.Matching;
 
@@ -34,11 +35,21 @@ public sealed record MdbType
     public IReadOnlyDictionary<string, LinkFieldRule> LinkRules { get; init; } = new Dictionary<string, LinkFieldRule>();
 
     /// <summary>
-    /// The raw `collection` mapping, undecomposed beyond <see cref="ReadDefaults"/> and
-    /// <see cref="LinkRules"/>. `path`, `unique`, `display`, and `projections` stay raw blobs —
-    /// their own future specs (Core Write, Query) own decomposing them.
+    /// The raw `collection` mapping, undecomposed beyond <see cref="ReadDefaults"/>,
+    /// <see cref="LinkRules"/>, and <see cref="ProjectionSources"/>. `path`/`unique`/`display`
+    /// stay raw blobs — their own future specs (Core Write) own decomposing them.
     /// </summary>
     public OrderedDictionary? CollectionSection { get; init; }
+
+    /// <summary>
+    /// Declared `collection.projections` source text, keyed by projection/target-field name
+    /// (#34's coalesce-vs-conflict axis: identical source text coalesces across matched types,
+    /// differing text produces `type_conflict`).
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ProjectionSources { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>This type's own `collection.projections`, compiled and dependency-ordered (a projection may reference an earlier one in this same list by bare name).</summary>
+    internal IReadOnlyList<MdbCompiledProjection> CompiledProjections { get; init; } = Array.Empty<MdbCompiledProjection>();
 
     /// <summary>Resolved data-contract claims compiled during type loading.</summary>
     public IReadOnlyList<MdbTypeImplementation> Implements { get; init; } = Array.Empty<MdbTypeImplementation>();

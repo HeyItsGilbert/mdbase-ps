@@ -3,6 +3,8 @@ using System.Collections.Specialized;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Json.Schema;
+using Mdbase.Core.Cel;
+using Mdbase.Core.Compose;
 using Mdbase.Core.Json;
 using Mdbase.Core.Links;
 using Mdbase.Core.Matching;
@@ -67,14 +69,100 @@ internal static class TypeFileLoader
             _ => throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-mapping 'collection.read_defaults'."),
         };
         var linkRules = ParseLinkRules(collectionSection, relativeFilePath);
+        var (projectionSources, compiledProjections) = ParseProjections(collectionSection, relativeFilePath);
         var implementations = ParseImplements(frontmatter, relativeFilePath, contracts, schemaNode);
 
         return new MdbType
         {
             Name = name, FilePath = relativeFilePath, Version = version, Schema = schema, Match = match,
             ReadDefaults = readDefaults, LinkRules = linkRules, CollectionSection = collectionSection,
+            ProjectionSources = projectionSources, CompiledProjections = compiledProjections,
             Implements = implementations,
         };
+    }
+
+    /// <summary>
+    /// Compiles `collection.projections` (Ch.07 "Projections") and resolves this type's own
+    /// internal dependency order — a projection referencing another projection by bare name
+    /// creates the edge, exactly like #10 point 5's named query-projection resolution. A cycle
+    /// rejects the whole type file (spec Ch.05 fail-fast precedent).
+    /// </summary>
+    private static (IReadOnlyDictionary<string, string> Sources, IReadOnlyList<MdbCompiledProjection> Compiled) ParseProjections(
+        OrderedDictionary? collectionSection, string relativeFilePath)
+    {
+        if (collectionSection?["projections"] is not OrderedDictionary projections)
+        {
+            if (collectionSection?.Contains("projections") == true && collectionSection["projections"] is not null)
+            {
+                throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a non-mapping 'collection.projections'.");
+            }
+
+            return (new Dictionary<string, string>(), Array.Empty<MdbCompiledProjection>());
+        }
+
+        var sources = new Dictionary<string, string>(StringComparer.Ordinal);
+        var compiledByName = new Dictionary<string, (string Source, CompiledCelExpression Compiled)>(StringComparer.Ordinal);
+        foreach (DictionaryEntry entry in projections)
+        {
+            var name = (string)entry.Key;
+            string source;
+            try
+            {
+                source = CelSourceText.ExtractExprField(entry.Value, $"Type file '{relativeFilePath}' projection '{name}'");
+            }
+            catch (ArgumentException ex)
+            {
+                throw new TypeFileException("type_invalid", ex.Message);
+            }
+
+            sources[name] = source;
+            try
+            {
+                compiledByName[name] = (source, CelExpressionContext.Match.Compile(source));
+            }
+            catch (CelCompileException ex)
+            {
+                throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' projection '{name}' is invalid: {ex.Message}");
+            }
+        }
+
+        var projectionNames = new HashSet<string>(compiledByName.Keys, StringComparer.Ordinal);
+        var ordered = new List<MdbCompiledProjection>();
+        var visited = new Dictionary<string, int>(StringComparer.Ordinal); // 0 = visiting, 1 = done
+        void Visit(string name, List<string> path)
+        {
+            if (visited.TryGetValue(name, out var state))
+            {
+                if (state == 0)
+                {
+                    throw new TypeFileException("type_invalid", $"Type file '{relativeFilePath}' has a projections dependency cycle: {string.Join(" -> ", path.Append(name))}.");
+                }
+
+                return;
+            }
+
+            visited[name] = 0;
+            path.Add(name);
+            var (source, compiled) = compiledByName[name];
+            foreach (var dependency in compiled.FreeIdentifiers.Intersect(projectionNames, StringComparer.Ordinal))
+            {
+                if (dependency != name)
+                {
+                    Visit(dependency, path);
+                }
+            }
+
+            path.RemoveAt(path.Count - 1);
+            visited[name] = 1;
+            ordered.Add(new MdbCompiledProjection(name, source, compiled));
+        }
+
+        foreach (var name in projectionNames)
+        {
+            Visit(name, new List<string>());
+        }
+
+        return (sources, ordered);
     }
 
     private static IReadOnlyList<MdbTypeImplementation> ParseImplements(

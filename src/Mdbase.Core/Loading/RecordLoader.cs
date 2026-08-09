@@ -24,7 +24,9 @@ internal static class RecordLoader
         string body,
         string revision,
         IReadOnlyList<MdbType> matchedTypes,
-        IReadOnlyList<MdbDiagnostic>? extraDiagnostics = null)
+        string collectionRoot,
+        IReadOnlyList<MdbDiagnostic>? extraDiagnostics = null,
+        IReadOnlyList<MdbDiagnostic>? matchDiagnostics = null)
     {
         var (isValid, validationDiagnostics) = ValidateSchemas(rawFrontmatter, relativePath, matchedTypes);
 
@@ -60,8 +62,63 @@ internal static class RecordLoader
             compositionDiagnostics = compositionDiagnostics.Concat(linkRuleConflicts).ToList();
         }
 
+        // `match_expr_error` (Ch.07 "CEL Matching"): a per-candidate match.expr evaluation
+        // failure is non-terminating — it never flips `IsValid`, same bucket as `type_conflict`.
+        if (matchDiagnostics is { Count: > 0 })
+        {
+            compositionDiagnostics = compositionDiagnostics.Concat(matchDiagnostics).ToList();
+        }
+
+        // `collection.projections` (Ch.07 "Projections"): same #34 coalesce-vs-conflict axis as
+        // `read_defaults` (declared source-text equality), same "only a genuinely missing field
+        // is affected" timing — evaluated here, during the same eager pass.
+        var file = Cel.MdbFileCel.Build(collectionRoot, relativePath, body);
+        var perTypeProjectionValues = matchedTypes.ToDictionary(
+            t => t, t => ProjectionEvaluator.Evaluate(t, rawFrontmatter, file, relativePath));
+        foreach (var (_, evaluation) in perTypeProjectionValues)
+        {
+            if (evaluation.Diagnostics.Count > 0)
+            {
+                compositionDiagnostics = compositionDiagnostics.Concat(evaluation.Diagnostics).ToList();
+            }
+        }
+
+        var missingProjectionKeys = matchedTypes
+            .SelectMany(t => t.ProjectionSources.Keys)
+            .Where(key => !rawFrontmatter.Contains(key))
+            .ToHashSet(StringComparer.Ordinal);
+        var (coalescedProjectionNames, projectionConflicts) = TypeConflictComposer.Compose(
+            matchedTypes,
+            type => (IReadOnlyDictionary<string, string>)type.ProjectionSources
+                .Where(kv => missingProjectionKeys.Contains(kv.Key))
+                .ToDictionary(kv => kv.Key, kv => kv.Value),
+            StringComparer.Ordinal,
+            relativePath);
+        if (projectionConflicts.Count > 0)
+        {
+            compositionDiagnostics = compositionDiagnostics.Concat(projectionConflicts).ToList();
+        }
+
+        var coalescedProjectionValues = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var name in coalescedProjectionNames.Keys)
+        {
+            foreach (var type in matchedTypes)
+            {
+                if (perTypeProjectionValues[type].Values.TryGetValue(name, out var value))
+                {
+                    coalescedProjectionValues[name] = value;
+                    break;
+                }
+            }
+        }
+
         var effective = Clone(rawFrontmatter);
         foreach (var (key, value) in coalesced)
+        {
+            effective[key] = value;
+        }
+
+        foreach (var (key, value) in coalescedProjectionValues)
         {
             effective[key] = value;
         }
@@ -208,7 +265,7 @@ internal static class RecordLoader
             keys.Add((string)entry.Key);
         }
 
-        foreach (var key in matchedTypes.SelectMany(t => t.ReadDefaults.Keys))
+        foreach (var key in matchedTypes.SelectMany(t => t.ReadDefaults.Keys).Concat(matchedTypes.SelectMany(t => t.ProjectionSources.Keys)))
         {
             if (!keys.Contains(key))
             {

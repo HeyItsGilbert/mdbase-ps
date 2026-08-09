@@ -621,8 +621,9 @@ public sealed class MdbCollection
             });
         }
 
-        var matchedTypes = DetermineMatchedTypes(relativePath, frontmatter, extraDiagnostics);
-        return RecordLoader.Load(relativePath, frontmatter, body, revision, matchedTypes, extraDiagnostics);
+        var matchDiagnostics = new List<MdbDiagnostic>();
+        var matchedTypes = DetermineMatchedTypes(relativePath, frontmatter, body, extraDiagnostics, matchDiagnostics);
+        return RecordLoader.Load(relativePath, frontmatter, body, revision, matchedTypes, RootPath, extraDiagnostics, matchDiagnostics);
     }
 
     private static byte[] StripUtf8Bom(byte[] bytes) =>
@@ -630,7 +631,7 @@ public sealed class MdbCollection
 
     /// <summary>The matching decision process (spec Ch.07 "Matching Decision Process").</summary>
     private IReadOnlyList<MdbType> DetermineMatchedTypes(
-        string relativePath, OrderedDictionary frontmatter, List<MdbDiagnostic> diagnostics)
+        string relativePath, OrderedDictionary frontmatter, string body, List<MdbDiagnostic> diagnostics, List<MdbDiagnostic> matchDiagnostics)
     {
         var presentKeys = Config.ExplicitTypeKeys.Where(frontmatter.Contains).ToArray();
         if (presentKeys.Length > 0)
@@ -694,8 +695,9 @@ public sealed class MdbCollection
             return resolved;
         }
 
+        var file = Cel.MdbFileCel.Build(RootPath, relativePath, body);
         return _typesByCanonicalName.Values
-            .Where(t => t.Match.Matches(relativePath, frontmatter))
+            .Where(t => t.Match.Matches(relativePath, frontmatter, file, t.Name, matchDiagnostics))
             .OrderBy(t => t.CanonicalName, StringComparer.Ordinal)
             .ToList();
     }

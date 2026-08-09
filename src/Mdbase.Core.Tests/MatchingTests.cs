@@ -106,18 +106,73 @@ public class MatchingTests
     }
 
     [Fact]
-    public void Type_declaring_match_expr_is_rejected_with_unsupported_profile()
+    public void Match_expr_ands_with_structured_match_members()
     {
         using var fixture = new TempCollection();
-        fixture.WriteFile("_types/cel.md", """
+        fixture.WriteFile("_types/urgent-task.md", """
             ---
             kind: mdbase.type
-            name: cel-type
+            name: urgent-task
 
             match:
+              path_glob: "tasks/**/*.md"
               expr:
-                $expr: 'true'
+                $expr: "priority == 'high'"
 
+            schema:
+              dialect: json-schema-2020-12
+              value:
+                type: object
+            ---
+            """);
+        fixture.WriteFile("tasks/a.md", "---\npriority: high\n---\n");
+        fixture.WriteFile("tasks/b.md", "---\npriority: low\n---\n");
+        fixture.WriteFile("notes/c.md", "---\npriority: high\n---\n");
+
+        var collection = MdbCollection.Connect(fixture.RootPath);
+
+        Assert.Equal(new[] { "urgent-task" }, collection.Records["tasks/a.md"].MatchedTypes.Select(t => t.Name));
+        Assert.Empty(collection.Records["tasks/b.md"].MatchedTypes);
+        Assert.Empty(collection.Records["notes/c.md"].MatchedTypes);
+    }
+
+    [Fact]
+    public void Match_expr_only_type_matches_on_the_expression_alone()
+    {
+        using var fixture = new TempCollection();
+        fixture.WriteFile("_types/tagged.md", """
+            ---
+            kind: mdbase.type
+            name: tagged
+            match:
+              expr:
+                $expr: "'urgent' in tags"
+            schema:
+              dialect: json-schema-2020-12
+              value:
+                type: object
+            ---
+            """);
+        fixture.WriteFile("a.md", "---\ntags: [urgent, work]\n---\n");
+        fixture.WriteFile("b.md", "---\ntags: [work]\n---\n");
+
+        var collection = MdbCollection.Connect(fixture.RootPath);
+
+        Assert.Equal(new[] { "tagged" }, collection.Records["a.md"].MatchedTypes.Select(t => t.Name));
+        Assert.Empty(collection.Records["b.md"].MatchedTypes);
+    }
+
+    [Fact]
+    public void Malformed_match_expr_rejects_the_type_file_with_a_diagnostic()
+    {
+        using var fixture = new TempCollection();
+        fixture.WriteFile("_types/broken.md", """
+            ---
+            kind: mdbase.type
+            name: broken
+            match:
+              expr:
+                $expr: "status =="
             schema:
               dialect: json-schema-2020-12
               value:
@@ -128,7 +183,96 @@ public class MatchingTests
         var collection = MdbCollection.Connect(fixture.RootPath);
 
         Assert.Empty(collection.Types);
-        Assert.Contains(collection.Diagnostics, d => d.Code == "unsupported_profile" && d.Path == "_types/cel.md");
+        Assert.Contains(collection.Diagnostics, d => d.Code == "type_invalid" && d.Path == "_types/broken.md");
+    }
+
+    [Fact]
+    public void Match_expr_evaluation_error_excludes_the_candidate_without_aborting_others()
+    {
+        using var fixture = new TempCollection();
+        fixture.WriteFile("_types/numeric.md", """
+            ---
+            kind: mdbase.type
+            name: numeric
+            match:
+              expr:
+                $expr: "priority > 1"
+            schema:
+              dialect: json-schema-2020-12
+              value:
+                type: object
+            ---
+            """);
+        // priority is a string here, `> 1` throws a runtime type error against an int literal.
+        fixture.WriteFile("bad.md", "---\npriority: high\n---\n");
+        fixture.WriteFile("good.md", "---\npriority: 5\n---\n");
+
+        var collection = MdbCollection.Connect(fixture.RootPath);
+
+        Assert.Empty(collection.Records["bad.md"].MatchedTypes);
+        Assert.Contains(collection.Records["bad.md"].CompositionDiagnostics, d => d.Code == "match_expr_error" && d.Type == "numeric");
+        Assert.Equal(new[] { "numeric" }, collection.Records["good.md"].MatchedTypes.Select(t => t.Name));
+    }
+
+    [Fact]
+    public void Match_expr_evaluating_to_false_or_null_is_a_non_match()
+    {
+        using var fixture = new TempCollection();
+        fixture.WriteFile("_types/never.md", """
+            ---
+            kind: mdbase.type
+            name: never
+            match:
+              expr:
+                $expr: "false"
+            schema:
+              dialect: json-schema-2020-12
+              value:
+                type: object
+            ---
+            """);
+        fixture.WriteFile("_types/maybe.md", """
+            ---
+            kind: mdbase.type
+            name: maybe
+            match:
+              expr:
+                $expr: "does_not_exist_field"
+            schema:
+              dialect: json-schema-2020-12
+              value:
+                type: object
+            ---
+            """);
+        fixture.WriteFile("a.md", "---\ntitle: A\n---\n");
+
+        var collection = MdbCollection.Connect(fixture.RootPath);
+
+        Assert.Empty(collection.Records["a.md"].MatchedTypes);
+    }
+
+    [Fact]
+    public void Match_expr_sees_the_same_raw_frontmatter_context_as_structured_match()
+    {
+        using var fixture = new TempCollection();
+        fixture.WriteFile("_types/consistent.md", """
+            ---
+            kind: mdbase.type
+            name: consistent
+            match:
+              expr:
+                $expr: "present.raw.due == true && due == null && record.status == raw.status && note.status == 'open'"
+            schema:
+              dialect: json-schema-2020-12
+              value:
+                type: object
+            ---
+            """);
+        fixture.WriteFile("a.md", "---\nstatus: open\ndue: null\n---\n");
+
+        var collection = MdbCollection.Connect(fixture.RootPath);
+
+        Assert.Equal(new[] { "consistent" }, collection.Records["a.md"].MatchedTypes.Select(t => t.Name));
     }
 
     [Fact]
