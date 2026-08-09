@@ -49,3 +49,19 @@ Source: `tests/v0.3/data-contracts/data-contracts.yaml` at commit
 TaskNotes and data-contract fixture inputs are copied under `data-contracts/sources/`
 so the suite remains an offline, dated snapshot. `DataContractsConformanceTests`
 drives each case through `MdbCollection`'s public contract seams.
+
+
+## CEL profile
+
+Source: `tests/v0.3/cel/cel-profile.yaml` at commit
+`02388190b9287954139d7feac49d0e3e10c44cfe` (2026-08-03). The full fixture
+is copied under `cel/` so the suite remains an offline, dated snapshot.
+`CelConformanceTests` runs its `query` and `get_types` cases through
+`MdbCompiledQuery` and `MdbCollection`'s public type-membership seams.
+
+The remaining `evaluate_cel` cases intentionally do not run in this Core
+fixture adapter: Mdbase.Core does not expose a standalone CEL-evaluation API,
+and the fixture's workflow cases and `file.hasTag` case are outside #40's
+scope. Their record-query behavior is covered by the executable query and
+membership cases; the matching host bindings are also covered by the
+hand-written public-seam tests.
