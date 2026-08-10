@@ -1,6 +1,9 @@
 # Don't check in the Output dir
 Output/
 
+# .NET-published Core Engine, populated by the psake Build task
+mdbase/lib/
+
 scratch/
 
 testResults.xml

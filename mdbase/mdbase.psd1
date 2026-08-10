@@ -63,7 +63,7 @@ Description = 'A PowerShell implementation of the mdbase specification.'
 # TypesToProcess = @()
 
 # Format files (.ps1xml) to be loaded when importing this module
-# FormatsToProcess = @()
+FormatsToProcess = 'mdbase.format.ps1xml'
 
 # Modules to import as nested modules of the module specified in RootModule/ModuleToProcess
 # NestedModules = @()
@@ -86,8 +86,10 @@ AliasesToExport = '*'
 # List of all modules packaged with this module
 # ModuleList = @()
 
-# List of all files packaged with this module
-# FileList = @()
+# List of all files packaged with this module. Populated at build time (psake 'StageFiles'
+# PostAction) with every file under the published lib/net8.0/ Core Engine — dynamic because
+# the exact transitive-dependency DLL set depends on Mdbase.Core's own package references.
+FileList = @()
 
 # Private data to pass to the module specified in RootModule/ModuleToProcess. This may also contain a PSData hashtable with additional module metadata used by PowerShell.
 PrivateData = @{
