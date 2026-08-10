@@ -12,33 +12,43 @@ Describe 'Error translation' {
     }
 
     It 'preserves the MdbDiagnostic on $Error[0].TargetObject for a write failure' {
+        $caught = $null
         try {
-            New-MdbRecord -Collection $script:collection -Frontmatter @{ status = 'open' } -Path 'bad.md' -Confirm:$false -ErrorAction Stop
+            New-MdbRecord -Collection $script:collection -Frontmatter @{ status = 'open' } -Types task -Path 'bad.md' -Confirm:$false -ErrorAction Stop
         } catch {
+            $caught = $_
         }
 
-        $Error[0].TargetObject | Should -BeOfType ([Mdbase.Core.MdbDiagnostic])
-        $Error[0].TargetObject.Severity | Should -Be ([Mdbase.Core.MdbSeverity]::Error)
-        $Error[0].ErrorDetails.Message | Should -Not -BeNullOrEmpty
+        # Asserts against the directly-caught ErrorRecord, not the ambient $Error collection —
+        # $Error is a session-global list shared across every Pester container in the same
+        # process, so its [0] entry is not reliably *this* test's error once other test files
+        # run alongside this one.
+        $caught.TargetObject | Should -BeOfType ([Mdbase.Core.MdbDiagnostic])
+        $caught.TargetObject.Severity | Should -Be ([Mdbase.Core.MdbSeverity]::Error)
+        $caught.ErrorDetails.Message | Should -Not -BeNullOrEmpty
     }
 
     It 'synthesizes an invalid_query diagnostic for a malformed CEL expression that carries none' {
+        $caught = $null
         try {
             Find-MdbRecord -Collection $script:collection -Where 'status ===' -ErrorAction Stop
         } catch {
+            $caught = $_
         }
 
-        $Error[0].TargetObject | Should -BeOfType ([Mdbase.Core.MdbDiagnostic])
-        $Error[0].TargetObject.Code | Should -Be 'invalid_query'
+        $caught.TargetObject | Should -BeOfType ([Mdbase.Core.MdbDiagnostic])
+        $caught.TargetObject.Code | Should -Be 'invalid_query'
     }
 
     It 'synthesizes a collection_not_found diagnostic carrying the attempted path' {
+        $caught = $null
         try {
             Connect-MdbCollection -Path (Join-Path $TestDrive 'nowhere') -ErrorAction Stop
         } catch {
+            $caught = $_
         }
 
-        $Error[0].TargetObject.Code | Should -Be 'collection_not_found'
-        $Error[0].TargetObject.Path | Should -Not -BeNullOrEmpty
+        $caught.TargetObject.Code | Should -Be 'collection_not_found'
+        $caught.TargetObject.Path | Should -Not -BeNullOrEmpty
     }
 }

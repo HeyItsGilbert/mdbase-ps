@@ -32,26 +32,31 @@ class MdbaseCoreDependencyLoadContext : System.Runtime.Loader.AssemblyLoadContex
     }
 }
 
-# The loaded MdbaseCoreDependencyLoadContext and its Default.Resolving handler delegate, kept
-# alive for the module's lifetime via script scope — a delegate reachable only through a
-# function-local variable is not a reliable GC root once that function returns. Populated once
-# by Import-MdbaseCoreEngine; a second call is a no-op so re-dot-sourcing this file (e.g. under
-# Pester `InModuleScope`) never double-loads the assembly or double-subscribes Resolving.
-$script:MdbaseCoreDependencyLoadContext = $null
-$script:MdbaseCoreResolvingHandler = $null
-
+# Import-MdbaseCoreEngine must run at most once per *process*, not once per module instance:
+# every test file (and any other caller) does Import-Module/Remove-Module in the same PowerShell
+# session, and Remove-Module tears down the module's own session state — so a `$script:` guard
+# resets on every reimport and would re-subscribe a Resolving handler each time, accumulating
+# stale duplicate delegates on the process-global `[AssemblyLoadContext]::Default` event (each
+# closing over an increasingly orphaned dependency context — this previously surfaced as
+# "Could not load file or assembly 'Microsoft.PowerShell.CrossCompatibility'" when PSScriptAnalyzer
+# ran after 18 Pester files had each imported and removed this module). `[AssemblyLoadContext]::All`
+# is authoritative process state instead: once created with `isCollectible: $false`, our named
+# context stays rooted there (and its Resolving-handler delegate stays rooted by the Default ALC's
+# own event invocation list) for the life of the process, so checking for it here is both the
+# correctness guard and sufficient to keep everything alive — no extra script/global state needed.
 function Import-MdbaseCoreEngine {
     <#
     .SYNOPSIS
-        Loads Mdbase.Core.dll and isolates its transitive dependencies, once per session.
+        Loads Mdbase.Core.dll and isolates its transitive dependencies, once per process.
     .DESCRIPTION
-        Runs once, in mdbase.psm1, before any Public/Private function is dot-sourced, so every
-        cmdlet's parameter type constraints (e.g. [Mdbase.Core.MdbCollection]) resolve at parse
-        time. Mdbase.Core.dll loads into the default AssemblyLoadContext directly (so PowerShell's
-        `[TypeName]` resolver can see it); a private AssemblyLoadContext resolves everything it
-        depends on (JsonSchema.Net, Celly, YamlDotNet, Markdig, the RFC 8785 canonicalizer)
-        via a [AssemblyLoadContext]::Default.Resolving hook, so those stay isolated from whatever
-        else is loaded in the host process.
+        Runs on every module import, in mdbase.psm1, before any Public/Private function is
+        dot-sourced, so every cmdlet's parameter type constraints (e.g. [Mdbase.Core.MdbCollection])
+        resolve at parse time. Mdbase.Core.dll loads into the default AssemblyLoadContext directly
+        (so PowerShell's `[TypeName]` resolver can see it); a private AssemblyLoadContext resolves
+        everything it depends on (JsonSchema.Net, Celly, YamlDotNet, Markdig, the RFC 8785
+        canonicalizer) via a [AssemblyLoadContext]::Default.Resolving hook, so those stay isolated
+        from whatever else is loaded in the host process. A second call in the same process — e.g.
+        after Remove-Module/Import-Module — is a no-op.
     .PARAMETER ModuleRoot
         The module's own root directory ($PSScriptRoot from mdbase.psm1); `lib/net8.0/Mdbase.Core.dll`
         is resolved relative to it.
@@ -63,7 +68,9 @@ function Import-MdbaseCoreEngine {
         [string]$ModuleRoot
     )
 
-    if ($null -ne $script:MdbaseCoreDependencyLoadContext) {
+    $alreadyLoaded = [System.Runtime.Loader.AssemblyLoadContext]::All |
+        Where-Object { $_.Name -eq 'mdbase-core-dependencies' }
+    if ($null -ne $alreadyLoaded) {
         return
     }
 
@@ -72,9 +79,9 @@ function Import-MdbaseCoreEngine {
         throw "Mdbase.Core.dll was not found at '$assemblyPath'. Build the module first (psake 'Build' task publishes the Core Engine into lib/net8.0/)."
     }
 
-    $script:MdbaseCoreDependencyLoadContext = [MdbaseCoreDependencyLoadContext]::new($assemblyPath)
+    $dependencyLoadContext = [MdbaseCoreDependencyLoadContext]::new($assemblyPath)
 
-    $script:MdbaseCoreResolvingHandler = [System.Func[System.Runtime.Loader.AssemblyLoadContext, System.Reflection.AssemblyName, System.Reflection.Assembly]] {
+    $resolvingHandler = [System.Func[System.Runtime.Loader.AssemblyLoadContext, System.Reflection.AssemblyName, System.Reflection.Assembly]] {
         # $context (the requesting AssemblyLoadContext) is part of the Resolving event's fixed
         # delegate signature and unused here by design.
         param($context, $assemblyName)
@@ -82,9 +89,14 @@ function Import-MdbaseCoreEngine {
             return $null
         }
 
-        return $script:MdbaseCoreDependencyLoadContext.LoadFromAssemblyName($assemblyName)
-    }
-    [System.Runtime.Loader.AssemblyLoadContext]::Default.add_Resolving($script:MdbaseCoreResolvingHandler)
+        # Calling .Load() directly (the resolver-backed override above) rather than
+        # .LoadFromAssemblyName(): the latter, on an unresolved name, falls back to the full
+        # assembly-binding ceremony and re-raises Default.Resolving for the very same name —
+        # infinite recursion (observed as a stack overflow) for any assembly this resolver
+        # can't satisfy, e.g. one probed by unrelated in-process tooling like PSScriptAnalyzer.
+        return $dependencyLoadContext.Load($assemblyName)
+    }.GetNewClosure()
+    [System.Runtime.Loader.AssemblyLoadContext]::Default.add_Resolving($resolvingHandler)
 
     [System.Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath($assemblyPath) | Out-Null
 }

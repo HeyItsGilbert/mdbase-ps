@@ -3,6 +3,13 @@ properties {
     $PSBPreference.Build.CompileModule = $false
     $PSBPreference.Help.DefaultLocale = 'en-US'
     $PSBPreference.Test.OutputFile = 'out/testResults.xml'
+
+    # PowerShellBuild's GenerateMarkdown/GenerateMAML tasks treat every subfolder of
+    # Docs.RootDir as a locale folder of PlatyPS-generated cmdlet markdown (Get-ChildItem
+    # -Directory | Update-MarkdownHelp). The default (the whole 'docs/' tree) collides with
+    # this repo's non-PlatyPS docs (docs/adr/, docs/research/, docs/reference/, docs/agents/),
+    # which aren't PlatyPS markdown and fail to parse — scope it to a dedicated subfolder instead.
+    $PSBPreference.Docs.RootDir = [IO.Path]::Combine($PSBPreference.General.ProjectRoot, 'docs', 'help')
 }
 
 task Default -depends Test

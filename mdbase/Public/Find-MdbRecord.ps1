@@ -22,10 +22,16 @@ function Find-MdbRecord {
         Field references, same "field[:asc|desc]" shape as -OrderBy.
     .PARAMETER Summaries
         A hashtable of result-name -> "field:function".
+    .PARAMETER Limit
+        Maximum number of results to return; every result is returned when omitted.
+    .PARAMETER Offset
+        Number of leading results to skip before applying -Limit; no skip when omitted.
     .PARAMETER Context
         Collection-relative path resolved once into `context.this`.
     .PARAMETER FrontmatterMode
         Which frontmatter member(s) serialize into each result: Effective (default), Persisted, or Both.
+    .PARAMETER IncludeBody
+        Includes each record's Markdown body alongside its frontmatter in the result.
     .PARAMETER Raw
         Emits the full MdbQueryResultSet (Results/Meta/Diagnostics) instead of just Results.
     .EXAMPLE
